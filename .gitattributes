@@ -1,0 +1,10 @@
+# Force LF for shell scripts so they work on Linux/EC2
+*.sh    text eol=lf
+
+# Windows scripts use CRLF
+*.ps1   text eol=crlf
+
+# Python and text files - normalize
+*.py    text eol=lf
+*.txt   text eol=lf
+*.md    text eol=lf
