@@ -33,7 +33,9 @@ QUERY_ID = os.environ.get("IBKR_QUERY_ID", "")
 if not TOKEN or not QUERY_ID:
     sys.exit("Error: IBKR_TOKEN and IBKR_QUERY_ID must be set as environment variables.\n"
              "Copy .env.example to .env and fill in your credentials, then run via run.sh / run.ps1.")
-OUTPUT_FILE = dt.date.today().strftime("Reports_%d%b%Y") + ".xlsx"
+_REPORTS_DIR = "reports"
+os.makedirs(_REPORTS_DIR, exist_ok=True)
+OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("Reports_%d%b%Y") + ".xlsx")
 
 BASE = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
 SEND_URL = f"{BASE}/SendRequest"
