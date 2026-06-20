@@ -1,0 +1,1292 @@
+{
+  "12": {
+    "symbol": "META",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 613.6,
+    "quantity": 30,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "26": {
+    "symbol": "AMD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 495.4,
+    "quantity": 30,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "25": {
+    "symbol": "AMD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 497.24,
+    "trigger": 496.89,
+    "quantity": 30,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "380": {
+    "symbol": "GBP",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.33865,
+    "quantity": 100,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "379": {
+    "symbol": "GBP",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.38905,
+    "trigger": 1.33905,
+    "quantity": 100,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "374": {
+    "symbol": "CHF",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.2564,
+    "quantity": 2500,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "373": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.6095,
+    "trigger": 1.5595,
+    "quantity": 100,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562401": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562370": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562387": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562398": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16225,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562397": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16225,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562593": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562356": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 1.16293,
+    "trigger": null,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562367": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562364": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542410": {
+    "symbol": "NFLX",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542406": {
+    "symbol": "AAPL",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542402": {
+    "symbol": "AMD",
+    "action": "BUY",
+    "orderType": "LMT",
+    "limit": 488.71,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215518": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "LMT",
+    "limit": 1.1112,
+    "trigger": null,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562547": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1627,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215519": {
+    "symbol": "MES",
+    "action": "BUY",
+    "orderType": "LMT",
+    "limit": 7489.0,
+    "trigger": null,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215517": {
+    "symbol": "AAPL",
+    "action": "BUY",
+    "orderType": "LMT",
+    "limit": 301.12,
+    "trigger": null,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542398": {
+    "symbol": "AMD",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562550": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215534": {
+    "symbol": "USD",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562497": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215531": {
+    "symbol": "USD",
+    "action": "BUY",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215528": {
+    "symbol": "USD",
+    "action": "BUY",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562500": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 2.16358,
+    "quantity": 20000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215520": {
+    "symbol": "IBUS500",
+    "action": "BUY",
+    "orderType": "LMT",
+    "limit": 7485.75,
+    "trigger": null,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562508": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562465": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16315,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562727": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562468": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 0.16384,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542564": {
+    "symbol": "USD",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562485": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16285,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562450": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542738": {
+    "symbol": "CHF",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.6094,
+    "trigger": 1.2594,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542736": {
+    "symbol": "GBP",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.38895,
+    "trigger": 1.33895,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542737": {
+    "symbol": "GBP",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.33865,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542734": {
+    "symbol": "GBP",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.38575,
+    "trigger": 1.33575,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542735": {
+    "symbol": "GBP",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.33855,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542646": {
+    "symbol": "AMD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 493.92,
+    "trigger": 493.57,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542647": {
+    "symbol": "AMD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 492.19,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542644": {
+    "symbol": "CHF",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.60855,
+    "trigger": 1.25855,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542645": {
+    "symbol": "CHF",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.2556,
+    "quantity": 2500,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542525": {
+    "symbol": "USD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 160.55,
+    "trigger": 160.2,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542526": {
+    "symbol": "USD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 159.72,
+    "quantity": 16,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542487": {
+    "symbol": "AMD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 490.41,
+    "trigger": 490.06,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542488": {
+    "symbol": "AMD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 488.94,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542396": {
+    "symbol": "META",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 615.45,
+    "trigger": 615.1,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542390": {
+    "symbol": "META",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 615.45,
+    "trigger": 615.1,
+    "quantity": 30,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C15542391": {
+    "symbol": "META",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 613.25,
+    "quantity": 30,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692563149": {
+    "symbol": "IBUS500",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 7548.0,
+    "trigger": 7547.0,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692563150": {
+    "symbol": "IBUS500",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 7539.65,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692563089": {
+    "symbol": "IBUS500",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 7551.0,
+    "trigger": 7550.0,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692563090": {
+    "symbol": "IBUS500",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 7542.45,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692563024": {
+    "symbol": "IBUS500",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 7561.0,
+    "trigger": 7560.0,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692563025": {
+    "symbol": "IBUS500",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 7552.44,
+    "quantity": 1,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562964": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1623,
+    "trigger": 1.1618,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562965": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16065,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562934": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.162,
+    "trigger": 1.1615,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562935": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16045,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562877": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1617,
+    "trigger": 1.1612,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562878": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16005,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562825": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1641,
+    "trigger": 1.1636,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562826": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1624,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562823": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.16405,
+    "trigger": 1.16355,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562824": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1624,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562798": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1642,
+    "trigger": 1.1637,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562799": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16255,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562750": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1644,
+    "trigger": 1.1639,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562751": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16275,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562614": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.16465,
+    "trigger": 1.16415,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562615": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.163,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562569": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1646,
+    "trigger": 1.1641,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562570": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16295,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562545": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.16435,
+    "trigger": 1.16385,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562546": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1627,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562526": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.16445,
+    "trigger": 1.16395,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562527": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1628,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562483": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1645,
+    "trigger": 1.164,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562484": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562463": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1648,
+    "trigger": 1.1643,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562464": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562447": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1639,
+    "trigger": 1.1634,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562448": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562425": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.164,
+    "trigger": 1.1635,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562426": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16235,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562412": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1641,
+    "trigger": 1.1636,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562413": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16245,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562395": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1639,
+    "trigger": 1.1634,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562396": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562376": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1634,
+    "trigger": 1.1629,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562377": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562360": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1627,
+    "trigger": 1.1622,
+    "quantity": 0,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1692562361": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215603": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.162,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215604": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16035,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215598": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1615,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215599": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1614,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215596": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1615,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215597": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1614,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215591": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1613,
+    "trigger": 1.1613,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215592": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1612,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215589": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1613,
+    "trigger": 1.1613,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215590": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1612,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215584": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1616,
+    "trigger": 1.1616,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215585": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215579": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1616,
+    "trigger": 1.1616,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215580": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215577": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1616,
+    "trigger": 1.1616,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215578": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215572": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1616,
+    "trigger": 1.1616,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215573": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16145,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215567": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1615,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215568": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1614,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215562": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1615,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215563": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1614,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215557": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1616,
+    "trigger": 1.1616,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215558": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1615,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215552": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.1612,
+    "trigger": 1.1612,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215553": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1611,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215547": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.17,
+    "trigger": 1.17,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215548": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16885,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215545": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1.17,
+    "trigger": 1.17,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1259215546": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.16885,
+    "quantity": 25000,
+    "last_seen": "2026-06-05",
+    "first_seen": "2026-06-05"
+  },
+  "C1406534719": {
+    "symbol": "US-T",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 99.98,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-08",
+    "first_seen": "2026-06-08"
+  }
+}
