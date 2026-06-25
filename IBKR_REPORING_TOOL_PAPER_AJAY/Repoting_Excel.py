@@ -47,7 +47,7 @@ if not TOKEN or not QUERY_ID:
 
 _REPORTS_DIR = "reports"
 os.makedirs(_REPORTS_DIR, exist_ok=True)
-OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_ajay.xlsx")
+OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_Shubham.xlsx")
 
 # Persistent order ledger — accumulates trigger/limit from live open orders on
 # every run, so trades can be matched to the prices set when the order was placed.
@@ -522,10 +522,11 @@ def build_pending_rows(orders_by_symbol):
             entry["quantity"],
             _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
         ])
-        # Stop/SELL row — no Total Amount
+        # Stop/SELL row — no Total Amount.  Repeat the Contract from the entry
+        # row above so it isn't left blank.
         if stop:
             rows.append([
-                "", "", "", stop["action"], stop["orderType"],
+                "", symbol, "", stop["action"], stop["orderType"],
                 _fmt_price(stop["trigger"]), _fmt_price(stop["limit"]),
                 _offset(stop["trigger"], stop["limit"]),
                 "", stop["quantity"],
@@ -697,15 +698,9 @@ def _list_previous_reports():
             if os.path.abspath(path) == os.path.abspath(OUTPUT_FILE):
                 continue
             d = dt.date.min
-            # Strip an optional trailing "_ajay" tag before the extension so
-            # both "MIS_paper_16Jun2026.xlsx" and "MIS_paper_16Jun2026_ajay.xlsx"
-            # parse to the same date for carry-forward matching.
-            stem = fn[:-len(".xlsx")] if fn.lower().endswith(".xlsx") else fn
-            if stem.endswith("_ajay"):
-                stem = stem[:-len("_ajay")]
             for prefix in ("MIS_paper_", "MIS_", "Reports_"):
                 try:
-                    d = dt.datetime.strptime(stem, prefix + "%d%b%Y").date()
+                    d = dt.datetime.strptime(fn, prefix + "%d%b%Y.xlsx").date()
                     break
                 except ValueError:
                     continue
@@ -1468,8 +1463,8 @@ def _fill_index_sheet(ws, sheet_titles, account_id="N/A"):
     # start the credentials box beneath it.
     cred_title_row = 4 + len(details) + 2          # one-row gap after Report Details
     credentials = [
-        ("Username", "algo-ggt2"),
-        ("Password", "algoggt12))"),
+        ("Username", "gautam575"),
+        ("Password", "algoggt1))"),
     ]
     ws.merge_cells(start_row=cred_title_row, start_column=5,
                    end_row=cred_title_row, end_column=6)

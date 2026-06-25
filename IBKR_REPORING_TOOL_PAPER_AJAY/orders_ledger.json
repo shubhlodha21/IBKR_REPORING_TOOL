@@ -1,22 +1,22 @@
 {
   "12": {
-    "symbol": "EUR",
+    "symbol": "GBP",
     "action": "BUY",
     "orderType": "STPLMT",
-    "limit": 1.16045,
-    "trigger": 1.15995,
-    "quantity": 25000,
-    "last_seen": "2026-06-16",
+    "limit": 1.3211,
+    "trigger": 1.3209,
+    "quantity": 20000,
+    "last_seen": "2026-06-24",
     "first_seen": "2026-06-05"
   },
   "26": {
-    "symbol": "AMD",
-    "action": "SELL",
-    "orderType": "STP",
-    "limit": null,
-    "trigger": 495.4,
-    "quantity": 30,
-    "last_seen": "2026-06-05",
+    "symbol": "AAPL",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 300.93,
+    "trigger": 300.88,
+    "quantity": 10,
+    "last_seen": "2026-06-24",
     "first_seen": "2026-06-05"
   },
   "25": {
@@ -16460,13 +16460,13 @@
     "first_seen": "2026-06-16"
   },
   "13": {
-    "symbol": "EUR",
+    "symbol": "GBP",
     "action": "SELL",
     "orderType": "STP",
     "limit": null,
-    "trigger": 1.1599,
-    "quantity": 25000,
-    "last_seen": "2026-06-16",
+    "trigger": 1.32025,
+    "quantity": 20000,
+    "last_seen": "2026-06-24",
     "first_seen": "2026-06-16"
   },
   "15": {
@@ -20188,5 +20188,945 @@
     "quantity": 0,
     "last_seen": "2026-06-19",
     "first_seen": "2026-06-19"
+  },
+  "C839472377": {
+    "symbol": "GOOGL",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 348.54,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472376": {
+    "symbol": "XOM",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 138.42,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472379": {
+    "symbol": "JPM",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 331.73,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472378": {
+    "symbol": "BAC",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 57.37,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472381": {
+    "symbol": "PG",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 148.74,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472380": {
+    "symbol": "AAPL",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 299.08,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472382": {
+    "symbol": "WMT",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 117.27,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472375": {
+    "symbol": "META",
+    "action": "SELL",
+    "orderType": "LMT",
+    "limit": 565.75,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472363": {
+    "symbol": "GOOGL",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 348.6,
+    "trigger": 348.55,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472364": {
+    "symbol": "GOOGL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 348.38,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472361": {
+    "symbol": "TMO",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 464.13,
+    "trigger": 464.08,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472362": {
+    "symbol": "TMO",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 463.85,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472359": {
+    "symbol": "UNH",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 408.64,
+    "trigger": 408.59,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472360": {
+    "symbol": "UNH",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 408.39,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472356": {
+    "symbol": "NFLX",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 73.4,
+    "trigger": 73.35,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472357": {
+    "symbol": "NFLX",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 73.31,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472354": {
+    "symbol": "NFLX",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 73.39,
+    "trigger": 73.34,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472355": {
+    "symbol": "NFLX",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 73.31,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472351": {
+    "symbol": "AMD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 547.82,
+    "trigger": 547.77,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472352": {
+    "symbol": "AMD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 547.5,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472349": {
+    "symbol": "AMZN",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 234.64,
+    "trigger": 234.59,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472350": {
+    "symbol": "AMZN",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 234.47,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472347": {
+    "symbol": "ORCL",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 177.44,
+    "trigger": 177.39,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472348": {
+    "symbol": "ORCL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 177.3,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472345": {
+    "symbol": "AMZN",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 234.59,
+    "trigger": 234.54,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472346": {
+    "symbol": "AMZN",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 234.44,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472343": {
+    "symbol": "ADBE",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 193.22,
+    "trigger": 193.17,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472344": {
+    "symbol": "ADBE",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 193.07,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472341": {
+    "symbol": "GOOGL",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 348.56,
+    "trigger": 348.51,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472342": {
+    "symbol": "GOOGL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 348.38,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472339": {
+    "symbol": "NFLX",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 73.33,
+    "trigger": 73.28,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472340": {
+    "symbol": "NFLX",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 73.24,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472337": {
+    "symbol": "AMZN",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 234.53,
+    "trigger": 234.48,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472338": {
+    "symbol": "AMZN",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 234.41,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472335": {
+    "symbol": "NFLX",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 73.32,
+    "trigger": 73.27,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472336": {
+    "symbol": "NFLX",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 73.23,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472333": {
+    "symbol": "JNJ",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 230.92,
+    "trigger": 230.87,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472334": {
+    "symbol": "JNJ",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 230.75,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472331": {
+    "symbol": "NFLX",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 73.31,
+    "trigger": 73.26,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472332": {
+    "symbol": "NFLX",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 73.23,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472329": {
+    "symbol": "V",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 329.4,
+    "trigger": 329.35,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472330": {
+    "symbol": "V",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 329.19,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472327": {
+    "symbol": "MA",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 486.52,
+    "trigger": 486.47,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472328": {
+    "symbol": "MA",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 486.23,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472325": {
+    "symbol": "AMZN",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 234.46,
+    "trigger": 234.41,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472326": {
+    "symbol": "AMZN",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 234.29,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472323": {
+    "symbol": "KO",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 79.91,
+    "trigger": 79.86,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472324": {
+    "symbol": "KO",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 79.82,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472321": {
+    "symbol": "NOW",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 92.84,
+    "trigger": 92.79,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472322": {
+    "symbol": "NOW",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 92.74,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472319": {
+    "symbol": "AVGO",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 397.32,
+    "trigger": 397.27,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472320": {
+    "symbol": "AVGO",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 397.07,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472317": {
+    "symbol": "UNH",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 408.22,
+    "trigger": 408.17,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472318": {
+    "symbol": "UNH",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 408.0,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472315": {
+    "symbol": "AMD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 546.53,
+    "trigger": 546.48,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472316": {
+    "symbol": "AMD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 546.21,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472313": {
+    "symbol": "GOOGL",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 348.52,
+    "trigger": 348.47,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472314": {
+    "symbol": "GOOGL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 348.31,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472311": {
+    "symbol": "PG",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 148.82,
+    "trigger": 148.77,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472312": {
+    "symbol": "PG",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 148.71,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472309": {
+    "symbol": "WMT",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 117.33,
+    "trigger": 117.28,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472310": {
+    "symbol": "WMT",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 117.22,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472307": {
+    "symbol": "ABBV",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 231.6,
+    "trigger": 231.55,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472308": {
+    "symbol": "ABBV",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 231.43,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472305": {
+    "symbol": "NVDA",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 209.33,
+    "trigger": 209.28,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472306": {
+    "symbol": "NVDA",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 209.18,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472303": {
+    "symbol": "HD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 327.71,
+    "trigger": 327.66,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472304": {
+    "symbol": "HD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 327.5,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472299": {
+    "symbol": "PFE",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 25.24,
+    "trigger": 25.19,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472300": {
+    "symbol": "PFE",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 25.18,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472297": {
+    "symbol": "TSLA",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 408.5,
+    "trigger": 408.45,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472298": {
+    "symbol": "TSLA",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 408.25,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472295": {
+    "symbol": "MRK",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 115.41,
+    "trigger": 115.36,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472296": {
+    "symbol": "MRK",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 115.3,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472285": {
+    "symbol": "CRM",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 149.17,
+    "trigger": 149.12,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839472286": {
+    "symbol": "CRM",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 149.05,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468126": {
+    "symbol": "LLY",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 1108.95,
+    "trigger": 1108.9,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468127": {
+    "symbol": "LLY",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1108.35,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468115": {
+    "symbol": "PEP",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 141.15,
+    "trigger": 141.1,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468117": {
+    "symbol": "PEP",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 141.03,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468111": {
+    "symbol": "TMO",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 462.86,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468105": {
+    "symbol": "JNJ",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 230.65,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468103": {
+    "symbol": "BAC",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 57.27,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468101": {
+    "symbol": "XOM",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 138.27,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468095": {
+    "symbol": "ADBE",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 192.57,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839468093": {
+    "symbol": "ORCL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 176.28,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839467480": {
+    "symbol": "COST",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 949.03,
+    "trigger": 948.98,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839467481": {
+    "symbol": "COST",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 948.51,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839467127": {
+    "symbol": "JPM",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 331.46,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839466715": {
+    "symbol": "META",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 564.87,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839466305": {
+    "symbol": "MSFT",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 369.86,
+    "quantity": 0,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "C839465811": {
+    "symbol": "AAPL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 298.59,
+    "quantity": 10,
+    "last_seen": "2026-06-23",
+    "first_seen": "2026-06-23"
+  },
+  "27": {
+    "symbol": "AAPL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 300.73,
+    "quantity": 10,
+    "last_seen": "2026-06-24",
+    "first_seen": "2026-06-24"
+  },
+  "0": {
+    "symbol": "XAUUSD",
+    "action": "BUY",
+    "orderType": "MKT",
+    "limit": null,
+    "trigger": null,
+    "quantity": 10,
+    "last_seen": "2026-06-25",
+    "first_seen": "2026-06-25"
   }
 }

@@ -522,10 +522,11 @@ def build_pending_rows(orders_by_symbol):
             entry["quantity"],
             _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
         ])
-        # Stop/SELL row — no Total Amount
+        # Stop/SELL row — no Total Amount.  Repeat the Contract from the entry
+        # row above so it isn't left blank.
         if stop:
             rows.append([
-                "", "", "", stop["action"], stop["orderType"],
+                "", symbol, "", stop["action"], stop["orderType"],
                 _fmt_price(stop["trigger"]), _fmt_price(stop["limit"]),
                 _offset(stop["trigger"], stop["limit"]),
                 "", stop["quantity"],

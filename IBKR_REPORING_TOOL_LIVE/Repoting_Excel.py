@@ -2,7 +2,7 @@
 Fetch IBKR Flex Query trades and write an Excel file with sheets:
   - Dashboard         (account info + 7-day & prev-day P&L summary)
   - Pending Order     (live from TWS)
-  - Running Positions (net open positions from 24 May 2026 onwards)
+  - Running Positions (net open positions across all trades)
   - PreviousDay
   - Past7Days
   - Past30Days
@@ -50,6 +50,21 @@ _REPORTS_DIR = "reports"
 os.makedirs(_REPORTS_DIR, exist_ok=True)
 OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_%d%b%Y") + ".xlsx")
 
+# Fixed "old account" reference workbook. These sheets belong to a closed
+# account, never change, and are copied VERBATIM (values + formatting) into
+# every report. Each entry is (report_title, [candidate source tab names]) —
+# the first candidate found in OLD_REFERENCE.xlsx is copied. Multiple candidates
+# are listed so a tab rename in the source (e.g. "Open Position old" vs
+# "Open Position old AC") doesn't silently drop the sheet. Matching is done on
+# stripped/lower-cased names, so trailing spaces and case don't matter.
+OLD_REFERENCE_FILE   = os.path.join(_REPORTS_DIR, "OLD_REFERENCE.xlsx")
+OLD_REFERENCE_SHEETS = [
+    ("Dashboard old AC",     ["Dashboard old AC"]),
+    ("Open Position old AC", ["Open Position old AC", "Open Position old"]),
+    ("All Trades old AC",    ["All Trades old AC",    "All Trades old"]),
+    ("Trade Summary old AC", ["Trade Summary old AC", "Trade Summary old"]),
+]
+
 # Persistent order ledger — accumulates trigger/limit from live open orders on
 # every run, so trades can be matched to the prices set when the order was placed.
 # (IBKR does NOT retain this on executed trades, so we must capture it ourselves.)
@@ -74,20 +89,15 @@ EXEC_WAIT  = 15          # seconds to wait for executions (0.5 s timer + fills +
 
 _UNSET = (0, 1.7976931348623157e308)
 
-# Global data cutoff — the report only includes trades on/after this date.
-# This is shown on the Dashboard so the reporting window is always explicit.
-DATA_FROM = dt.date(2026, 5, 25)
-
-# Running positions use the same global cutoff.
-RUNNING_POSITIONS_FROM = DATA_FROM
+# No date cutoff — the report includes every trade IBKR returns.
 
 # Risk limits shown on the Dashboard (hardcoded).
-MAX_EXPOSURE   = 50000
+MAX_EXPOSURE   = 100000
 DAILY_MAX_LOSS = 2000
 
 # Cumulative loss attributed to bugs — a manually-maintained figure shown on the
 # Dashboard. Update this value here when it changes; it stays fixed otherwise.
-LOSS_DUE_TO_BUGS = -344.01
+LOSS_DUE_TO_BUGS = 0
 
 # IST offset for report timestamps
 _IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
@@ -600,35 +610,75 @@ def _resolve_sheet(wb, sheet_name):
     return None
 
 
+def _capture_cell_style(c):
+    """Snapshot a source cell's full styling, detached from its workbook so it
+    survives the source being closed. Returns a dict applied verbatim when the
+    cell is re-written, so borders, fills (highlights), fonts and alignment all
+    come across exactly as the user left them."""
+    from copy import copy
+    return {
+        "number_format": c.number_format,
+        "font":          copy(c.font),
+        "fill":          copy(c.fill),
+        "border":        copy(c.border),
+        "alignment":     copy(c.alignment),
+    }
+
+
+def _expand_column_widths(ws):
+    """Return {1-based column index: width} for a worksheet, expanding the
+    column RANGES openpyxl stores (a single dimension keyed by its first letter
+    can span min..max columns). Without expanding, the trailing columns in a
+    range lose their width and fall back to the default — making text wrap and
+    rows grow. Requires a fully-loaded (non read-only) worksheet."""
+    widths = {}
+    for key, dim in ws.column_dimensions.items():
+        if dim.width is None:
+            continue
+        lo = dim.min or column_index_from_string(key)
+        hi = dim.max or lo
+        for idx in range(lo, hi + 1):
+            widths[idx] = dim.width
+    return widths
+
+
 def _read_manual_sheet(wb, sheet_name):
     """Copy a manual sheet verbatim from a previous report.
 
-    Returns (headers, data_rows):
+    Returns (headers, data_rows, layout):
       - headers  : the column names exactly as they appear in row 2 (so any
                    rename the user made is preserved), trailing blanks trimmed.
       - data_rows: every row from row 3 onward, as-is, with fully-blank rows
                    dropped so leftover entry rows don't pile up run after run.
-                   Each cell is captured as a (value, number_format) pair so the
-                   original display (e.g. dates shown as "5 Jun 2026") is kept.
+                   Each cell is captured as a (value, style_dict) pair, where
+                   style_dict holds the original number format AND the cell's
+                   borders/fill/font/alignment — so the sheet is reproduced
+                   pixel-for-pixel, including any manual highlights.
+      - layout   : {"col_widths": {col_idx: width},
+                    "row_heights": [height-or-None per kept data row]} so the
+                   carried sheet keeps the exact column widths / row heights the
+                   user set, instead of the script's default sizing.
     """
     ws = _resolve_sheet(wb, sheet_name)
     if ws is None:
-        return [], []
+        return [], [], {"col_widths": {}, "row_heights": []}
     all_rows = list(ws.iter_rows(min_row=2))
     if not all_rows:
-        return [], []
+        return [], [], {"col_widths": {}, "row_heights": []}
     headers = ["" if c.value is None else c.value for c in all_rows[0]]
     while headers and headers[-1] == "":
         headers.pop()
     n = len(headers)
-    data = []
+    data, row_heights = [], []
     for cells in all_rows[1:]:
         cells = list(cells)[:n] if n else list(cells)
         if not cells or all(c.value in (None, "") for c in cells):
             continue
-        data.append([("" if c.value is None else c.value, c.number_format)
+        data.append([("" if c.value is None else c.value, _capture_cell_style(c))
                      for c in cells])
-    return headers, data
+        row_heights.append(ws.row_dimensions[cells[0].row].height)
+    layout = {"col_widths": _expand_column_widths(ws), "row_heights": row_heights}
+    return headers, data, layout
 
 
 def _read_alltrades_prices(wb):
@@ -698,7 +748,10 @@ def load_previous_report():
     prev_path = reports[0]
 
     try:
-        wb = load_workbook(prev_path, read_only=True, data_only=True)
+        # Not read_only: openpyxl only exposes column widths / row heights on a
+        # fully-loaded worksheet, and we carry those forward verbatim. These
+        # daily reports are small, so the extra memory is negligible.
+        wb = load_workbook(prev_path, data_only=True)
     except Exception as e:                                  # noqa: BLE001
         print(f"  [Carry-forward] could not open {prev_path}: {e}", file=sys.stderr)
         return {}, {}
@@ -895,8 +948,12 @@ HEADERS = [
 COLOR_COLUMNS_SUMMARY = ["PnL", "Unrealized PnL"]
 
 # Money columns formatted as 1,234.00 on the aggregate sheets.
-AMOUNT_COLUMNS_SUMMARY = ["Avg (bought)", "Avg (sold)", "Total (bought)",
-                          "Total (sold)", "Commission", "PnL", "Unrealized PnL"]
+AMOUNT_COLUMNS_SUMMARY = ["Total (bought)", "Total (sold)", "Commission",
+                          "PnL", "Unrealized PnL"]
+
+# Average price columns need finer precision (e.g. 1.14205), so they get a
+# 5-decimal format instead of the 2-decimal money format above.
+PRICE_COLUMNS_SUMMARY = ["Avg (bought)", "Avg (sold)"]
 
 
 def _flt(val):
@@ -951,21 +1008,30 @@ def aggregate(trade_rows):
     for symbol, c in data.items():
         avg_b     = c["buy_value"]  / c["buy_qty"]  if c["buy_qty"]  else 0.0
         avg_s     = c["sell_value"] / c["sell_qty"] if c["sell_qty"] else 0.0
+        net_qty   = c["buy_qty"] - c["sell_qty"]
+        # Realized P&L mirrors IBKR's "Net Total" = Total (sold) - Total (bought).
+        # IBKR's fifoPnlRealized/mtmPnl fields are unreliable for FX trades — they
+        # arrive as 0 (realized) or as a mark-to-market figure with the wrong sign
+        # (mtmPnl), so derive realized P&L from the traded values instead.
+        realized   = c["sell_value"] - c["buy_value"]
+        # Unrealized only applies while a position is still open; once it's flat
+        # (net 0) there is nothing unrealized, so don't carry IBKR's MTM figure.
+        unrealized = round(c["unrealized"], 2) if abs(net_qty) > 1e-9 else 0.0
         datetimes = sorted(c["dates"], key=lambda x: x[0])
         result.append({
             "Contract":             symbol,
             "Name":                 c["name"],
             "Buys":                 round(c["buy_qty"], 4),
             "Sells":                round(c["sell_qty"], 4),
-            "Net":                  round(c["buy_qty"] - c["sell_qty"], 4),
+            "Net":                  round(net_qty, 4),
             "Avg (bought)":         round(avg_b, 6),
             "Avg (sold)":           round(avg_s, 6),
             "Total (bought)":       round(c["buy_value"], 2),
             "Total (sold)":         round(c["sell_value"], 2),
             "Exchange List":        ", ".join(sorted(c["exchanges"])),
             "Commission":           round(c["commission"], 2),
-            "PnL":                  round(c["pnl"], 2),
-            "Unrealized PnL":       round(c["unrealized"], 2),
+            "PnL":                  round(realized, 2),
+            "Unrealized PnL":       unrealized,
             "First Trade Date (UTC)": datetimes[0][1]  if datetimes else "",
             "First Trade Date (GST)": _to_gst(datetimes[0][1])  if datetimes else "",
             "Last Trade Date (UTC)":  datetimes[-1][1] if datetimes else "",
@@ -999,14 +1065,16 @@ _CELL_BORDER = Border(left=_GRID_SIDE, right=_GRID_SIDE, top=_GRID_SIDE, bottom=
 
 # Uniform amount/money display across every sheet, e.g. 1,234.00 (and -1,234.00).
 _AMOUNT_FMT = "#,##0.00"
+# Average price display with 5 decimals, e.g. 1.14205.
+_PRICE_FMT  = "#,##0.00000"
 
 
-def _apply_amount_format(ws, col, start_row=3):
-    """Apply the 1,234.00 number format to numeric cells in a column."""
+def _apply_amount_format(ws, col, start_row=3, fmt=_AMOUNT_FMT):
+    """Apply a number format (default 1,234.00) to numeric cells in a column."""
     for r in range(start_row, ws.max_row + 1):
         cell = ws.cell(row=r, column=col)
         if isinstance(cell.value, (int, float)):
-            cell.number_format = _AMOUNT_FMT
+            cell.number_format = fmt
 
 # Green (Excel selection green) border drawn around each sheet's title banner.
 _TITLE_SIDE   = Side(style="medium", color="00B050")
@@ -1032,13 +1100,12 @@ def _color_pnl_cell(cell):
         cell.fill = _PNL_NEG_FILL
 
 # Sheet display titles
-_FROM_STR = DATA_FROM.strftime("%d-%b-%Y")
 _SHEET_TITLES = {
     "Dashboard":       "ACCOUNT DASHBOARD",
     "Pending Order":   "PENDING ORDERS",
-    "All Trades":      f"ALL TRADES  (From {_FROM_STR})",
-    "Open Position":   f"OPEN POSITIONS  (From {_FROM_STR})",
-    "Trade Summary":    f"TRADE SUMMARY  (From {_FROM_STR})",
+    "All Trades":      "ALL TRADES",
+    "Open Position":   "OPEN POSITIONS",
+    "Trade Summary":    "TRADE SUMMARY",
     "Strategy Details": "STRATEGY DETAILS",
     "Bugs":             "BUGS",
     "Shubham_Activity": "SHUBHAM ACTIVITY",
@@ -1048,8 +1115,8 @@ _SHEET_TITLES = {
 
 # Manually-filled sheets — only the title/headers (and dropdowns) are generated.
 BUGS_HEADERS = ["SR NO", "BUG_DETAILS", "Date Identified", "Severity",
-                "Current_Status", "Date of Resolution", "Resolution"]
-BUGS_WIDTHS  = [8, 70, 16, 12, 16, 18, 40]
+                "Current_Status", "Date of Resolution"]
+BUGS_WIDTHS  = [8, 70, 16, 12, 16, 18]
 
 # Dropdown choices for the Bugs sheet severity/status columns.
 BUGS_SEVERITY_CHOICES = "Critical,High,Medium,Low"
@@ -1115,14 +1182,105 @@ def _apply_autofilter(ws, n_cols, header_row=2):
     ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"
 
 
+def _copy_reference_sheet(wb, src_ws, new_title):
+    """Copy a worksheet VERBATIM (values + formatting) into wb under new_title.
+
+    Reproduces cell values, fonts/fills/borders/alignment/number formats,
+    merged ranges, column widths, row heights, freeze panes and gridline
+    visibility — so the copied sheet looks exactly like the source."""
+    from copy import copy
+
+    ws = wb.create_sheet(title=new_title)
+    for row in src_ws.iter_rows():
+        for cell in row:
+            nc = ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                nc.font          = copy(cell.font)
+                nc.border        = copy(cell.border)
+                nc.fill          = copy(cell.fill)
+                nc.alignment     = copy(cell.alignment)
+                nc.protection    = copy(cell.protection)
+                nc.number_format = cell.number_format
+            if cell.hyperlink:
+                nc.hyperlink = copy(cell.hyperlink)
+
+    for rng in src_ws.merged_cells.ranges:
+        ws.merge_cells(str(rng))
+
+    # Column widths. A single ColumnDimension can span a RANGE of columns
+    # (e.g. min=1,max=2 -> both A and B share one width), and openpyxl keys it
+    # only by the first letter. Apply the width/hidden flag to EVERY column in
+    # the range, or the trailing columns silently fall back to the default
+    # width — which made copied text wrap and rows grow tall.
+    for key, dim in src_ws.column_dimensions.items():
+        lo = dim.min or column_index_from_string(key)
+        hi = dim.max or lo
+        for idx in range(lo, hi + 1):
+            letter = get_column_letter(idx)
+            if dim.width is not None:
+                ws.column_dimensions[letter].width = dim.width
+            ws.column_dimensions[letter].hidden = dim.hidden
+
+    for key, dim in src_ws.row_dimensions.items():
+        if dim.height is not None:
+            ws.row_dimensions[key].height = dim.height
+        ws.row_dimensions[key].hidden = dim.hidden
+
+    # Sheet-level default sizing, so rows/columns without an explicit dimension
+    # render at the same size as the source (not openpyxl's own defaults).
+    sf = src_ws.sheet_format
+    if sf.defaultRowHeight is not None:
+        ws.sheet_format.defaultRowHeight = sf.defaultRowHeight
+    if sf.defaultColWidth is not None:
+        ws.sheet_format.defaultColWidth = sf.defaultColWidth
+    if sf.baseColWidth is not None:
+        ws.sheet_format.baseColWidth = sf.baseColWidth
+
+    ws.sheet_view.showGridLines = src_ws.sheet_view.showGridLines
+    ws.freeze_panes = src_ws.freeze_panes
+    return ws
+
+
+def _load_reference_sheet_pairs():
+    """Open OLD_REFERENCE.xlsx and return (src_wb, [(src_ws, report_title), ...]).
+
+    src_wb is returned so it stays open until the sheets have been copied; the
+    caller must close it. Returns (None, []) when the file is missing or locked
+    (e.g. open in Excel) so a run never fails just because the reference is
+    unavailable — the report is simply written without the old-account sheets."""
+    from openpyxl import load_workbook
+
+    if not os.path.exists(OLD_REFERENCE_FILE):
+        print(f"  [Old AC] {OLD_REFERENCE_FILE} not found - reference sheets skipped.",
+              file=sys.stderr)
+        return None, []
+    try:
+        src = load_workbook(OLD_REFERENCE_FILE)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"  [Old AC] could not open {OLD_REFERENCE_FILE}: {e} - "
+              f"reference sheets skipped.", file=sys.stderr)
+        return None, []
+
+    by_name = {ws.title.strip().lower(): ws for ws in src.worksheets}
+    pairs = []
+    for report_title, candidates in OLD_REFERENCE_SHEETS:
+        ws_src = next((by_name[c.strip().lower()] for c in candidates
+                       if c.strip().lower() in by_name), None)
+        if ws_src is None:
+            print(f"  [Old AC] no source tab {candidates} for '{report_title}' "
+                  f"in OLD_REFERENCE.xlsx - skipped.", file=sys.stderr)
+            continue
+        pairs.append((ws_src, report_title))
+    return src, pairs
+
+
 def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
 
-    # ── Global cutoff: keep only trades on/after DATA_FROM (25-May-2026) ──
-    rows = [r for r in rows if (parse_trade_date(r) or dt.date.min) >= DATA_FROM]
-    print(f"  [Filter] {len(rows)} trade(s) on/after {DATA_FROM:%d-%b-%Y}.")
+    # ── No date cutoff: include every trade IBKR returns (all BUY/SELL fills) ──
+    print(f"  [Filter] {len(rows)} trade(s) pulled from IBKR (no date cutoff).")
 
     # Today's set mirrors the Today Orders sheet: today's fills, or yesterday's
     # as a fallback when IBKR's Flex batch hasn't published today's yet.
@@ -1138,39 +1296,80 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
 
     agg_today = aggregate(rows_today)
     agg_7     = aggregate(rows_7)
-    agg_all   = aggregate(rows)             # all trades since DATA_FROM
+    agg_all   = aggregate(rows)             # all trades returned by IBKR
 
     # Carry forward what the user maintains by hand in the previous report:
     # trigger/limit prices (All Trades) and every manual sheet's rows.
     manual_prices, carried = load_previous_report()
 
-    # All Trades: every individual trade since DATA_FROM (ledger trigger/limit,
+    # All Trades: every individual trade IBKR returns (ledger trigger/limit,
     # with manually-entered prices from the previous report taking precedence).
     all_trade_rows = build_individual_trade_rows(rows, order_lookup=order_lookup,
                                                  manual_prices=manual_prices)
-    print(f"  [All Trades] {len(all_trade_rows)} individual trade(s) since {DATA_FROM:%d-%b-%Y}.")
+    print(f"  [All Trades] {len(all_trade_rows)} individual trade(s).")
 
-    # Sheet sequence: Index, Dashboard, Pending Order, Open Position, All Trades,
-    # Trade Summary, Strategy Details, Bugs, Shubham_Activity, Ajay_Activity,
-    # Pending_Task.
+    # Static "old account" reference sheets (from OLD_REFERENCE.xlsx). Loaded up
+    # front so the Index can list whichever ones are actually available, and so
+    # each can be slotted into its fixed position in the sheet sequence below.
+    ref_wb, ref_pairs = _load_reference_sheet_pairs()
+    ref_by_title = {title: ws for ws, title in ref_pairs}
+
+    def _copy_ref(title):
+        """Copy the named old-AC reference sheet into wb if it was available."""
+        src = ref_by_title.get(title)
+        if src is not None:
+            _copy_reference_sheet(wb, src, title)
+
+    # Final sheet sequence — each old-AC reference sheet sits right after its
+    # live counterpart, landing at fixed positions: Dashboard old AC (2),
+    # Open Position old AC (5), All Trades old AC (7), Trade Summary old AC (9).
+    # The Index lists the sheets in this exact order, so its SI numbers match
+    # the tab order.
+    index_order = [
+        ("Dashboard",            "live"),
+        ("Dashboard old AC",     "ref"),
+        ("Pending Order",        "live"),
+        ("Open Position",        "live"),
+        ("Open Position old AC", "ref"),
+        ("All Trades",           "live"),
+        ("All Trades old AC",    "ref"),
+        ("Trade Summary",        "live"),
+        ("Trade Summary old AC", "ref"),
+        ("Strategy Details",     "live"),
+        ("Bugs",                 "live"),
+        ("Shubham_Activity",     "live"),
+        ("Ajay_Activity",        "live"),
+        ("Pending_Task",         "live"),
+    ]
+    # Only list reference sheets that actually loaded (e.g. OLD_REFERENCE.xlsx
+    # missing/locked) so the Index never shows a dead link.
+    index_titles = [t for t, kind in index_order
+                    if kind == "live" or t in ref_by_title]
+
     wb = Workbook()
-    _fill_index_sheet(wb.active,
-                      ["Dashboard", "Pending Order", "Open Position",
-                       "All Trades", "Trade Summary", "Strategy Details",
-                       "Bugs", "Shubham_Activity", "Ajay_Activity",
-                       "Pending_Task"],
-                      account_id)
+    _fill_index_sheet(wb.active, index_titles, account_id)
+
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
+    _copy_ref("Dashboard old AC")
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
     _fill_running_positions_sheet(wb.create_sheet(),  rows)
+    _copy_ref("Open Position old AC")
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
+    _copy_ref("All Trades old AC")
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
+    _copy_ref("Trade Summary old AC")
     _fill_strategy_sheet(wb.create_sheet(), carried.get("Strategy Details"))
     _fill_bugs_sheet(wb.create_sheet(), carried.get("Bugs"))
     _fill_activity_sheet(wb.create_sheet(), "Shubham_Activity", carried.get("Shubham_Activity"))
     _fill_activity_sheet(wb.create_sheet(), "Ajay_Activity", carried.get("Ajay_Activity"))
     _fill_pending_task_sheet(wb.create_sheet(), carried.get("Pending_Task"))
+
+    if ref_wb is not None:
+        ref_wb.close()
+        n_ref = sum(1 for t, kind in index_order if kind == "ref" and t in ref_by_title)
+        print(f"  [Old AC] copied {n_ref} reference sheet(s) at positions 2/5/7/9.")
+
     wb.save(OUTPUT_FILE)
     print(f"Wrote {OUTPUT_FILE}: {len(pending_rows)} pending, "
           f"{len(all_trade_rows)} all trades, "
@@ -1250,7 +1449,6 @@ def _fill_index_sheet(ws, sheet_titles, account_id="N/A"):
     details = [
         ("Account ID",         account_id),
         ("Report Date",        today.strftime("%d-%b-%Y")),
-        ("Data From (cutoff)", DATA_FROM.strftime("%d-%b-%Y")),
     ]
     ws.merge_cells("E4:F4")
     dt_title = ws["E4"]
@@ -1273,8 +1471,8 @@ def _fill_index_sheet(ws, sheet_titles, account_id="N/A"):
     # start the credentials box beneath it.
     cred_title_row = 4 + len(details) + 2          # one-row gap after Report Details
     credentials = [
-        ("Username", "algo-ggt1"),
-        ("Password", "algoggt1))"),
+        ("Username", "algo-ggt11"),
+        ("Password", "algoggt12))"),
     ]
     ws.merge_cells(start_row=cred_title_row, start_column=5,
                    end_row=cred_title_row, end_column=6)
@@ -1317,10 +1515,9 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
     info = [
         ("Account ID",         account_id,                     ""),
         ("Report Date",        now_ist.strftime("%d-%b-%Y"),    ""),
-        ("Data From (cutoff)", DATA_FROM.strftime("%d-%b-%Y"),  ""),
     ]
 
-    # ── All-trades summary (everything since DATA_FROM) ───────────────
+    # ── All-trades summary (everything IBKR returns) ──────────────────
     at_buys   = sum(r["Total (bought)"]       for r in agg_all)
     at_sells  = sum(r["Total (sold)"]         for r in agg_all)
     at_comm   = sum(r["Commission"]           for r in agg_all)
@@ -1347,7 +1544,7 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
     # ── Assemble all sections with dividers ───────────────────────────
     sections = [
         ("REPORT INFO",                          info),
-        (f"ALL TRADES SUMMARY (From {DATA_FROM:%d-%b-%Y})", summary_all),
+        ("ALL TRADES SUMMARY",                   summary_all),
     ]
 
     r_idx = 3
@@ -1447,9 +1644,7 @@ def _fill_pending_sheet(ws, rows):
 
 # ── Open Position sheet ───────────────────────────────────────────────
 def _fill_running_positions_sheet(ws, trade_rows):
-    filtered = [r for r in trade_rows
-                if (parse_trade_date(r) or dt.date.min) >= RUNNING_POSITIONS_FROM]
-    agg     = aggregate(filtered)
+    agg     = aggregate(trade_rows)
     running = [r for r in agg if r["Net"] != 0]
     _fill_sheet(ws, "Open Position", running)
 
@@ -1471,6 +1666,11 @@ def _fill_sheet(ws, title, agg_rows):
     for h in AMOUNT_COLUMNS_SUMMARY:
         if h in HEADERS:
             _apply_amount_format(ws, HEADERS.index(h) + 1)
+
+    # Average price columns: 5-decimal format, e.g. 1.14205.
+    for h in PRICE_COLUMNS_SUMMARY:
+        if h in HEADERS:
+            _apply_amount_format(ws, HEADERS.index(h) + 1, fmt=_PRICE_FMT)
 
     # Shade money columns green (positive) / faint red (negative).
     for h in COLOR_COLUMNS_SUMMARY:
@@ -1502,6 +1702,35 @@ def _col_by_header(ws, *names, header_row=2):
     return None
 
 
+def _drop_carried_column(carried, *col_names):
+    """Remove the named column(s) from a carried (headers, rows, layout) triple.
+
+    Used to retire a column from a manual sheet that is otherwise reproduced
+    verbatim from the previous report — without this, the old column would keep
+    coming back every run via the carry-forward. Matching is case-insensitive
+    and ignores surrounding whitespace. Carried column widths are re-indexed to
+    the surviving columns. Returns a new triple (or the original `carried`
+    unchanged when there is nothing to drop)."""
+    if not carried:
+        return carried
+    headers, rows, layout = carried
+    drop = {n.strip().lower() for n in col_names}
+    keep = [i for i, h in enumerate(headers)
+            if str(h).strip().lower() not in drop]
+    if len(keep) == len(headers):
+        return carried                      # nothing matched — leave as-is
+    new_headers = [headers[i] for i in keep]
+    new_rows    = [[row[i] for i in keep if i < len(row)] for row in rows]
+    # Re-index carried column widths (1-based) onto the surviving columns.
+    old_widths  = (layout or {}).get("col_widths", {})
+    new_widths  = {new_idx: old_widths[old_i + 1]
+                   for new_idx, old_i in enumerate(keep, start=1)
+                   if (old_i + 1) in old_widths}
+    new_layout  = dict(layout or {})
+    new_layout["col_widths"] = new_widths
+    return new_headers, new_rows, new_layout
+
+
 def _add_list_dropdown(ws, col_letter, choices):
     """Attach a list-validation dropdown to col_letter, rows 3..(max or 1000)."""
     if not col_letter:
@@ -1517,32 +1746,59 @@ def _write_verbatim_manual_sheet(ws, sheet_key, default_headers, widths, carried
     the carried header row and every carried data row, with NO blank entry rows.
     New entries are typed straight into the empty rows below the data.
 
-    `carried` is the (headers, rows) pair from _read_manual_sheet. On the very
-    first run (nothing carried) we fall back to the built-in default_headers.
-    Returns the column count used."""
-    headers, rows = carried if carried else (None, None)
+    `carried` is the (headers, rows, layout) triple from _read_manual_sheet. On
+    the very first run (nothing carried) we fall back to the built-in
+    default_headers and the built-in `widths`. Returns the column count used."""
+    headers, rows, layout = carried if carried else (None, None, None)
     headers = list(headers) if headers else list(default_headers)
+    layout  = layout or {}
     n_cols  = len(headers)
 
     ws.title = sheet_key
     _write_title_row(ws, _SHEET_TITLES[sheet_key], n_cols)
     _write_header_row(ws, headers, row=2)
 
-    # Each carried cell is a (value, number_format) pair; reapply the original
-    # format so dates/numbers display exactly as they did in the prior report.
+    # Each carried cell is a (value, style) pair, where `style` is either the
+    # full style dict captured by _capture_cell_style (number format + borders +
+    # fill/highlight + font + alignment) or, for legacy callers, just a number
+    # format string. Reapply whatever is present so the cell looks exactly as it
+    # did in the prior report — manual highlights included.
+    row_heights = layout.get("row_heights", [])
     r = 3
-    for row in (rows or []):
+    for ridx, row in enumerate(rows or []):
         for c in range(1, n_cols + 1):
-            value, fmt = row[c - 1] if c - 1 < len(row) else ("", "General")
+            value, style = row[c - 1] if c - 1 < len(row) else ("", None)
             cell = ws.cell(row=r, column=c, value=value)
-            if fmt and fmt != "General":
-                cell.number_format = fmt
+            if isinstance(style, dict):
+                # The captured style objects are already detached copies, each
+                # used for a single cell — assign directly, no re-copy needed.
+                if style.get("number_format"):
+                    cell.number_format = style["number_format"]
+                if style.get("font"):      cell.font      = style["font"]
+                if style.get("fill"):      cell.fill      = style["fill"]
+                if style.get("border"):    cell.border    = style["border"]
+                if style.get("alignment"): cell.alignment = style["alignment"]
+            elif style and style != "General":
+                cell.number_format = style
+        # Carry the row's height forward when the user set a custom one.
+        if ridx < len(row_heights) and row_heights[ridx] is not None:
+            ws.row_dimensions[r].height = row_heights[ridx]
         r += 1
 
-    _style_data_rows(ws, start_row=3, n_cols=n_cols)
+    # First run (no carried styles): fall back to the uniform data styling.
+    if not rows:
+        _style_data_rows(ws, start_row=3, n_cols=n_cols)
 
-    for col, width in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(col)].width = width
+    # Column widths: use the widths carried from the previous report (preserving
+    # any the user adjusted, with ranges already expanded), falling back to the
+    # built-in default for any column the previous report didn't size.
+    carried_widths = layout.get("col_widths", {})
+    for col in range(1, n_cols + 1):
+        w = carried_widths.get(col)
+        if w is None and col - 1 < len(widths):
+            w = widths[col - 1]
+        if w is not None:
+            ws.column_dimensions[get_column_letter(col)].width = w
 
     _apply_autofilter(ws, n_cols)
     ws.freeze_panes = "A3"
@@ -1586,7 +1842,11 @@ def _fill_bugs_sheet(ws, carried=None):
     The Severity column keeps a Critical/High/Medium/Low dropdown and the
     Current_Status column a Fixed/Not Fixed dropdown (located by header name so
     they stay correct even if columns shift).
+
+    The legacy "Resolution" column is dropped from any carried-forward data so
+    it doesn't keep reappearing from older reports.
     """
+    carried = _drop_carried_column(carried, "Resolution")
     _write_verbatim_manual_sheet(ws, "Bugs", BUGS_HEADERS, BUGS_WIDTHS, carried)
 
     # Bug details column reads better left-aligned than centred.

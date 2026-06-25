@@ -57,7 +57,7 @@ REPORTS_DIR = Path(__file__).resolve().parent / "Reports"
 # Persistent daily ledger: one accumulating row per report date, copied into
 # every merged workbook as the "Daywize_Snapshot" sheet (newest day on top).
 SNAPSHOT_FILE = Path(__file__).resolve().parent / "Daywize_Snapshot.xlsx"
-SNAPSHOT_SHEET = "Daywize_Snapshot"
+SNAPSHOT_SHEET = "Daywize_Snapshot_paper"
 SNAPSHOT_HEADERS = [
     "Date",
     "Open Trades Count",
@@ -69,8 +69,9 @@ SNAPSHOT_HEADERS = [
 # --- Index layout constants (1-based rows/cols, matching the source files) ---
 SI_COL = "B"             # column holding the serial number
 DESC_COL = "C"           # column holding the description
-LIVE_LAST_ITEM_ROW = 15  # row of live item #10 (Pending_Task)
+LIVE_LAST_ITEM_ROW = 19  # row of the last live item (Pending_Task, #14)
 LIVE_FIRST_ITEM_ROW = 6  # row of live item #1 (Dashboard)
+LIVE_LOGIN_LAST_ROW = 10 # row of the live "Password" cell (end of Login box)
 PAPER_FIRST_ITEM_ROW = 6 # row of paper item #1 in paper_Index
 PAPER_LAST_ITEM_ROW = 10 # row of paper item #5 in paper_Index
 BOX_GAP = 1              # blank rows between the live and paper detail boxes
@@ -90,6 +91,11 @@ PAPER_SHEET_CONFIG = {
     "paper_All Trades":    ("stack", 1,    3),
     "paper_Trade Summary": ("stack", 1,    None),
 }
+
+# Paper sheets dropped entirely from the merge (both the Index row and the data
+# sheet are skipped). Empty: every paper sheet (incl. paper_Trade Summary) is
+# kept so the merged Index carries all 16 items, each with its detail sheet.
+EXCLUDED_PAPER_SHEETS = set()
 
 
 def parse_dt(value):
@@ -146,6 +152,14 @@ def copy_cell_style(src, dst):
         dst.alignment = copy.copy(src.alignment)
 
 
+def copy_row_height(src_cell, dst_ws, dst_row):
+    """Carry the source row's custom height onto dst_row (no-op if unset)."""
+    src_ws = src_cell.parent
+    dim = src_ws.row_dimensions.get(src_cell.row)
+    if dim is not None and dim.height is not None:
+        dst_ws.row_dimensions[dst_row].height = dim.height
+
+
 def parse_paper_name(paper_path):
     """Split a paper file name into (date, account_name).
 
@@ -187,6 +201,8 @@ def append_paper_index_rows(index_ws, paper_index_ws, prefix, out_row, next_numb
     for src_row in range(PAPER_FIRST_ITEM_ROW, PAPER_LAST_ITEM_ROW + 1):
         desc = paper_index_ws[f"{DESC_COL}{src_row}"].value
         if desc is None:
+            continue
+        if str(desc) in EXCLUDED_PAPER_SHEETS:
             continue
         desc = rename_paper_title(str(desc), prefix)
 
@@ -240,16 +256,21 @@ def copy_box(src_ws, dst_ws, src_range, dst_top_row):
     return max_r + row_shift + 1
 
 
-def append_paper_detail_boxes(index_ws, paper_index_ws, start_row):
+def append_paper_detail_boxes(index_ws, paper_index_ws, start_row, include_report=True):
     """Copy one paper account's Report Details + Login Details boxes.
 
     Anchors the "Report Details" box at ``start_row`` and returns the next free
-    row below the pasted "Login Details" box.
+    row below the pasted "Login Details" box. When ``include_report`` is False
+    the Report Details box is skipped (only the Login box is copied), used to
+    drop the duplicate Report Details box of the 2nd+ paper accounts.
     """
-    # Paper "Report Details" box: E4:F7  (cols 5-6)
-    next_row = copy_box(paper_index_ws, index_ws, (4, 5, 7, 6), start_row)
-    # one blank row, then paper "Login Details (Paper Account)" box: E9:F11
-    return copy_box(paper_index_ws, index_ws, (9, 5, 11, 6), next_row + 1)
+    row = start_row
+    if include_report:
+        # Paper "Report Details" box without the "Data From (cutoff)" row, so
+        # only E4:F6 (Report Details / Account ID / Report Date) is copied.
+        row = copy_box(paper_index_ws, index_ws, (4, 5, 6, 6), start_row) + BOX_GAP
+    # paper "Login Details (Paper Account)" box: E9:F11
+    return copy_box(paper_index_ws, index_ws, (9, 5, 11, 6), row)
 
 
 def copy_header_rows(src_ws, dst_ws, n_rows, n_cols):
@@ -319,6 +340,7 @@ def build_stacked_sheet(dst_wb, title, source_sheets, sort_col, srno_col):
         out_row = DATA_START_ROW + i
         for c, src in enumerate(cells, start=1):
             copy_cell_style(src, dst.cell(out_row, c))
+        copy_row_height(cells[0], dst, out_row)
         if srno_col:
             dst.cell(out_row, srno_col).value = i + 1
 
@@ -344,6 +366,7 @@ def build_grouped_sheet(dst_wb, title, source_sheets, srno_col):
             is_leader = cells[srno_col - 1].value is not None
             for c, src in enumerate(cells, start=1):
                 copy_cell_style(src, dst.cell(out_row, c))
+            copy_row_height(cells[0], dst, out_row)
             if is_leader:
                 dst.cell(out_row, srno_col).value = srno
                 srno += 1
@@ -512,15 +535,18 @@ def merge_pair(live_path: Path, paper_paths, out_path: Path, report_date):
     add_index_row(index_ws, out_row, next_number, SNAPSHOT_SHEET)
 
     # Detail boxes: stack every paper account's Report + Login boxes (cols E-F)
-    # so all credentials are retained. The live Login box ends at row 11.
-    box_row = 11 + 1 + BOX_GAP
-    for wb in paper_wbs:
-        box_row = append_paper_detail_boxes(index_ws, wb["paper_Index"], box_row) + BOX_GAP
+    # so all credentials are retained, below the live Login box.
+    box_row = LIVE_LOGIN_LAST_ROW + 1 + BOX_GAP
+    for i, wb in enumerate(paper_wbs):
+        # Only the first paper account keeps its Report Details box; the rest
+        # are duplicates (same Account ID/dates), so just stack their Login box.
+        box_row = append_paper_detail_boxes(
+            index_ws, wb["paper_Index"], box_row, include_report=(i == 0)) + BOX_GAP
 
     # One combined sheet per report type, pooling every paper account's data.
     for ws in paper_wbs[0].worksheets:
         title = ws.title
-        if title == "paper_Index":
+        if title == "paper_Index" or title in EXCLUDED_PAPER_SHEETS:
             continue
         sources = [wb[title] for wb in paper_wbs if title in wb.sheetnames]
         mode, sort_col, srno_col = PAPER_SHEET_CONFIG.get(title, ("stack", None, None))
