@@ -592,5 +592,27 @@
     "exchange": "NASDAQ",
     "time": "20260625  01:31:24",
     "commission": 1.00003
+  },
+  "0000e215.6a3cd94e.01.01": {
+    "account": "DU4293588",
+    "contract": "USD",
+    "action": "BUY",
+    "quantity": 50000.0,
+    "price": 161.754,
+    "currency": "JPY",
+    "exchange": "IDEALPRO",
+    "time": "20260626  01:09:06",
+    "commission": 2.0
+  },
+  "0000e215.6a3cd997.01.01": {
+    "account": "DU4293588",
+    "contract": "USD",
+    "action": "BUY",
+    "quantity": 50000.0,
+    "price": 161.752,
+    "currency": "JPY",
+    "exchange": "IDEALPRO",
+    "time": "20260626  01:10:00",
+    "commission": 2.0
   }
 }

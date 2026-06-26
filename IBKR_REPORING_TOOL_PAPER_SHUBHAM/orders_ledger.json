@@ -17458,5 +17458,65 @@
     "quantity": 1,
     "last_seen": "2026-06-25",
     "first_seen": "2026-06-25"
+  },
+  "983": {
+    "symbol": "NVDA",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 206.88,
+    "quantity": 10,
+    "last_seen": "2026-06-26",
+    "first_seen": "2026-06-26"
+  },
+  "982": {
+    "symbol": "NVDA",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 207.29,
+    "trigger": 207.29,
+    "quantity": 10,
+    "last_seen": "2026-06-26",
+    "first_seen": "2026-06-26"
+  },
+  "990": {
+    "symbol": "EUR",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.1351,
+    "quantity": 10000,
+    "last_seen": "2026-06-26",
+    "first_seen": "2026-06-26"
+  },
+  "999": {
+    "symbol": "MSFT",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 349.9,
+    "quantity": 10,
+    "last_seen": "2026-06-26",
+    "first_seen": "2026-06-26"
+  },
+  "C1501723841": {
+    "symbol": "USD",
+    "action": "BUY",
+    "orderType": "MKT",
+    "limit": 161.754,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-26",
+    "first_seen": "2026-06-26"
+  },
+  "C1501723838": {
+    "symbol": "USD",
+    "action": "BUY",
+    "orderType": "LMT",
+    "limit": 161.752,
+    "trigger": null,
+    "quantity": 0,
+    "last_seen": "2026-06-26",
+    "first_seen": "2026-06-26"
   }
 }

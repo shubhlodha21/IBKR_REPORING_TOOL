@@ -1320,21 +1320,21 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
         if src is not None:
             _copy_reference_sheet(wb, src, title)
 
-    # Final sheet sequence — each old-AC reference sheet sits right after its
-    # live counterpart, landing at fixed positions: Dashboard old AC (2),
-    # Open Position old AC (5), All Trades old AC (7), Trade Summary old AC (9).
-    # The Index lists the sheets in this exact order, so its SI numbers match
-    # the tab order.
+    # Final sheet sequence — all four old-AC reference sheets are grouped first
+    # (right after the Index), landing at fixed positions: Dashboard old AC (2),
+    # Open Position old AC (3), Trade Summary old AC (4), All Trades old AC (5).
+    # The live sheets follow, then the manual sheets. The Index lists the sheets
+    # in this exact order, so its SI numbers match the tab order.
     index_order = [
-        ("Dashboard",            "live"),
         ("Dashboard old AC",     "ref"),
+        ("Open Position old AC", "ref"),
+        ("Trade Summary old AC", "ref"),
+        ("All Trades old AC",    "ref"),
+        ("Dashboard",            "live"),
         ("Pending Order",        "live"),
         ("Open Position",        "live"),
-        ("Open Position old AC", "ref"),
         ("All Trades",           "live"),
-        ("All Trades old AC",    "ref"),
         ("Trade Summary",        "live"),
-        ("Trade Summary old AC", "ref"),
         ("Strategy Details",     "live"),
         ("Bugs",                 "live"),
         ("Shubham_Activity",     "live"),
@@ -1349,16 +1349,19 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     wb = Workbook()
     _fill_index_sheet(wb.active, index_titles, account_id)
 
+    # Old-AC reference sheets first (grouped right after the Index).
+    _copy_ref("Dashboard old AC")
+    _copy_ref("Open Position old AC")
+    _copy_ref("Trade Summary old AC")
+    _copy_ref("All Trades old AC")
+
+    # Live sheets, then the manual sheets.
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
-    _copy_ref("Dashboard old AC")
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
     _fill_running_positions_sheet(wb.create_sheet(),  rows)
-    _copy_ref("Open Position old AC")
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
-    _copy_ref("All Trades old AC")
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
-    _copy_ref("Trade Summary old AC")
     _fill_strategy_sheet(wb.create_sheet(), carried.get("Strategy Details"))
     _fill_bugs_sheet(wb.create_sheet(), carried.get("Bugs"))
     _fill_activity_sheet(wb.create_sheet(), "Shubham_Activity", carried.get("Shubham_Activity"))
@@ -1368,7 +1371,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     if ref_wb is not None:
         ref_wb.close()
         n_ref = sum(1 for t, kind in index_order if kind == "ref" and t in ref_by_title)
-        print(f"  [Old AC] copied {n_ref} reference sheet(s) at positions 2/5/7/9.")
+        print(f"  [Old AC] copied {n_ref} reference sheet(s) at positions 2/3/4/5.")
 
     wb.save(OUTPUT_FILE)
     print(f"Wrote {OUTPUT_FILE}: {len(pending_rows)} pending, "
