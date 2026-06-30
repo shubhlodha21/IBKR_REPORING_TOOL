@@ -79,10 +79,12 @@ VERSION  = "3"
 MAX_POLL_ATTEMPTS = 12
 POLL_WAIT_SECONDS = 5
 
-# TWS live connection
-HOST       = "127.0.0.1"
-PORT       = 7496        # 7496 live TWS | 7497 paper | 4001/4002 Gateway
-CLIENT_ID  = 998
+# TWS live connection. Host/port/client id come from the environment (.env) so
+# you can point the report at paper TWS for testing without editing code — e.g.
+# set IBKR_TWS_PORT=7497 for paper. Defaults are the live-TWS values.
+HOST       = os.environ.get("IBKR_TWS_HOST", "127.0.0.1")
+PORT       = int(os.environ.get("IBKR_TWS_PORT", "7496"))  # 7496 live TWS | 7497 paper | 4001/4002 Gateway
+CLIENT_ID  = int(os.environ.get("IBKR_TWS_CLIENT_ID", "998"))
 ORDER_WAIT = 8           # seconds to wait for open-order callbacks
 ACCT_WAIT  = 8           # seconds to wait for account-summary callbacks
 POS_WAIT   = 8           # seconds to wait for live-position callbacks
