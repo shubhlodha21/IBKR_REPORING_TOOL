@@ -1695,6 +1695,13 @@ def _build_live_open_positions(live_positions, trade_rows):
     merged from the Flex trade aggregation when the contract appears there; for
     a position opened outside the Flex window those columns are left blank and
     the contract's exchange falls back to the one IBKR reports on the position.
+
+    Matching the live position to the trade aggregation is the subtle part: for
+    FX, reqPositions reports contract.symbol as the bare base currency (e.g.
+    "USD") while the Flex trade history keys the same position by the PAIR
+    ("USD.JPY", which equals the position's localSymbol). So we try several
+    candidate identifiers — localSymbol, the constructed base.quote pair, and
+    the bare symbol — and use the first that exists in the aggregation.
     """
     agg_by_symbol = {r["Contract"]: r for r in aggregate(trade_rows)}
     rows = []
@@ -1702,10 +1709,23 @@ def _build_live_open_positions(live_positions, trade_rows):
         qty = p.get("position") or 0
         if abs(qty) < 1e-9:                 # flat → not an open position
             continue
-        base = dict(agg_by_symbol.get(p["symbol"], {}))
-        base["Contract"] = p["symbol"]
+        symbol = p.get("symbol") or ""
+        name   = p.get("name") or ""        # localSymbol, e.g. "USD.JPY" for FX
+        # For FX (CASH) the tradeable instrument is the base.quote pair, which is
+        # how it appears in the Flex history — build it so it can be matched.
+        pair = (f"{symbol}.{p.get('currency')}"
+                if p.get("secType") == "CASH" and p.get("currency") else "")
+        # Try the candidate identifiers against the trade aggregation, most
+        # specific first, so the descriptive columns merge in for FX and stocks.
+        agg_row, match_key = {}, symbol
+        for cand in (name, pair, symbol):
+            if cand and cand in agg_by_symbol:
+                agg_row, match_key = agg_by_symbol[cand], cand
+                break
+        base = dict(agg_row)
+        base["Contract"] = match_key or symbol
         if not base.get("Name"):
-            base["Name"] = p.get("name", "")
+            base["Name"] = name or pair or symbol
         base["Net"] = round(qty, 4)         # live broker quantity wins
         if not base.get("Exchange List"):
             base["Exchange List"] = p.get("exchange", "")
