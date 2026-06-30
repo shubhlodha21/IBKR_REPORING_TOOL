@@ -17518,5 +17518,95 @@
     "quantity": 0,
     "last_seen": "2026-06-26",
     "first_seen": "2026-06-26"
+  },
+  "1032": {
+    "symbol": "XAUUSD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 4037.78,
+    "quantity": 5,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1031": {
+    "symbol": "XAUUSD",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 4051.95,
+    "trigger": 4047.9,
+    "quantity": 5,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1965": {
+    "symbol": "IBM",
+    "action": "SELL",
+    "orderType": "STPLMT",
+    "limit": 268.96,
+    "trigger": 269.23,
+    "quantity": 10,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1966": {
+    "symbol": "IBM",
+    "action": "BUY",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 269.63,
+    "quantity": 10,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1063": {
+    "symbol": "SPCX",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 148.99,
+    "quantity": 10,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1955": {
+    "symbol": "EUR",
+    "action": "BUY",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 1.13955,
+    "quantity": 25000,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1050": {
+    "symbol": "USD",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 161.275,
+    "quantity": 30,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1072": {
+    "symbol": "IBUKOIL",
+    "action": "SELL",
+    "orderType": "STP",
+    "limit": null,
+    "trigger": 72.34,
+    "quantity": 100,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
+  },
+  "1071": {
+    "symbol": "IBUKOIL",
+    "action": "BUY",
+    "orderType": "STPLMT",
+    "limit": 73.12,
+    "trigger": 73.07,
+    "quantity": 100,
+    "last_seen": "2026-06-27",
+    "first_seen": "2026-06-27"
   }
 }

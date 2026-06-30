@@ -47,7 +47,7 @@ if not TOKEN or not QUERY_ID:
 
 _REPORTS_DIR = "reports"
 os.makedirs(_REPORTS_DIR, exist_ok=True)
-OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_Shubham.xlsx")
+OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_Ajay.xlsx")
 
 # Persistent order ledger — accumulates trigger/limit from live open orders on
 # every run, so trades can be matched to the prices set when the order was placed.

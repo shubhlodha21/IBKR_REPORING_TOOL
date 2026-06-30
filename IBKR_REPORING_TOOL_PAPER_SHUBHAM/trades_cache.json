@@ -614,5 +614,38 @@
     "exchange": "IDEALPRO",
     "time": "20260626  01:10:00",
     "commission": 2.0
+  },
+  "00025b45.6a476478.01.01": {
+    "account": "DU4293588",
+    "contract": "IBM",
+    "action": "SELL",
+    "quantity": 10.0,
+    "price": 269.58,
+    "currency": "USD",
+    "exchange": "NYSE",
+    "time": "20260627  00:05:58",
+    "commission": 1.057513
+  },
+  "0000e215.6a3e1c57.01.01": {
+    "account": "DU4293588",
+    "contract": "EUR",
+    "action": "SELL",
+    "quantity": 25000.0,
+    "price": 1.13898,
+    "currency": "USD",
+    "exchange": "IDEALPRO",
+    "time": "20260627  00:06:05",
+    "commission": 2.0
+  },
+  "00025b45.6a477ec8.01.01": {
+    "account": "DU4293588",
+    "contract": "IBM",
+    "action": "BUY",
+    "quantity": 10.0,
+    "price": 269.99,
+    "currency": "USD",
+    "exchange": "ARCA",
+    "time": "20260627  00:31:29",
+    "commission": 1.00003
   }
 }
