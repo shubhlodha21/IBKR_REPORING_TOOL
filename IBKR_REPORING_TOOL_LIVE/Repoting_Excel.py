@@ -92,6 +92,19 @@ EXEC_WAIT  = 15          # seconds to wait for executions (0.5 s timer + fills +
 
 _UNSET = (0, 1.7976931348623157e308)
 
+# IBKR sends Double.MAX_VALUE as the "unset" sentinel for portfolio figures that
+# aren't available (e.g. realizedPNL before any close). Treat those as missing.
+_SENTINEL = 1.7976931348623157e308
+
+
+def _ibkr_has(v):
+    """True when an IBKR numeric value is real (not None and not the MAX_VALUE
+    sentinel IBKR uses to mean 'no value')."""
+    try:
+        return v is not None and abs(float(v)) < _SENTINEL
+    except (ValueError, TypeError):
+        return False
+
 # No date cutoff — the report includes every trade IBKR returns.
 
 # Risk limits shown on the Dashboard (hardcoded).
@@ -141,11 +154,14 @@ class IBOrderApp(EWrapper, EClient):
         self.executions       = {}          # execId -> execution dict
         self.completed_orders = []          # today's filled/cancelled orders
         self.positions        = []          # live open positions (reqPositions)
+        self.portfolio        = {}          # conId -> live portfolio dict (updatePortfolio)
+        self.account_code     = ""          # managed account for reqAccountUpdates
         self._orders_done     = threading.Event()
         self._acct_done       = threading.Event()
         self._exec_done       = threading.Event()
         self._completed_done  = threading.Event()
         self._positions_done  = threading.Event()
+        self._portfolio_done  = threading.Event()
         self.connected_ok     = False
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
@@ -174,6 +190,7 @@ class IBOrderApp(EWrapper, EClient):
     def position(self, account, contract, position, avgCost):
         self.positions.append({
             "account":  account,
+            "conId":    contract.conId,
             "symbol":   contract.symbol,
             "secType":  contract.secType,
             "currency": contract.currency,
@@ -187,6 +204,33 @@ class IBOrderApp(EWrapper, EClient):
         print(f"[TWS] positionEnd - {len(self.positions)} live position(s).")
         self.cancelPositions()
         self._positions_done.set()
+
+    # ── live portfolio (per-position market value / unrealized & realized PnL) ──
+    def managedAccounts(self, accountsList):
+        # Fires on connect. reqAccountUpdates needs a concrete account code, so we
+        # subscribe here (the portfolio download then streams updatePortfolio).
+        self.account_code = (accountsList or "").split(",")[0].strip()
+        if self.account_code:
+            self.reqAccountUpdates(True, self.account_code)
+        else:
+            self._portfolio_done.set()
+
+    def updatePortfolio(self, contract, position, marketPrice, marketValue,
+                        averageCost, unrealizedPNL, realizedPNL, accountName):
+        self.portfolio[contract.conId] = {
+            "position":      position,
+            "marketPrice":   marketPrice,
+            "marketValue":   marketValue,
+            "averageCost":   averageCost,
+            "unrealizedPNL": unrealizedPNL,
+            "realizedPNL":   realizedPNL,
+        }
+
+    def accountDownloadEnd(self, accountName):
+        print(f"[TWS] accountDownloadEnd - {len(self.portfolio)} portfolio item(s).")
+        if self.account_code:
+            self.reqAccountUpdates(False, self.account_code)   # unsubscribe
+        self._portfolio_done.set()
 
     def _req_executions(self):
         # Empty filter → ALL of the current trading day's executions.
@@ -287,12 +331,20 @@ def fetch_tws_data():
     app._orders_done.wait(timeout=ORDER_WAIT)
     app._acct_done.wait(timeout=ACCT_WAIT)
     app._positions_done.wait(timeout=POS_WAIT)
+    app._portfolio_done.wait(timeout=POS_WAIT)
     app._exec_done.wait(timeout=EXEC_WAIT)
     app._completed_done.wait(timeout=EXEC_WAIT)
     # Commission reports arrive asynchronously after execDetailsEnd;
     # give TWS extra time to push them all through before we disconnect.
     time.sleep(1.5)
     app.disconnect()
+    # Merge the live portfolio figures (market value, avg cost, unrealized &
+    # realized PnL) onto each position by conId, so the Open Position sheet can
+    # source those columns straight from IBKR.
+    for p in app.positions:
+        pf = app.portfolio.get(p.get("conId"))
+        if pf:
+            p.update(pf)
     # connected_ok distinguishes "connected but flat" (empty list) from
     # "never connected" (None) so the Open Position sheet knows whether to
     # trust the empty result or fall back to the trade-netted figures.
@@ -1690,11 +1742,14 @@ def _build_live_open_positions(live_positions, trade_rows):
     IBKR positions (reqPositions) so the sheet shows the broker's actual
     holdings — not a netting of the (possibly incomplete) Flex trade history.
 
-    The Net column always carries IBKR's live signed quantity. The descriptive
-    columns (trade dates, buys/sells, totals, avg prices, commission, PnL) are
-    merged from the Flex trade aggregation when the contract appears there; for
-    a position opened outside the Flex window those columns are left blank and
-    the contract's exchange falls back to the one IBKR reports on the position.
+    The Net column always carries IBKR's live signed quantity, and the Unrealized
+    PnL / Realized PnL / position value come straight from IBKR's live portfolio
+    feed (updatePortfolio) when available. The remaining descriptive columns
+    (trade dates, buys/sells, bought-vs-sold split, commission) are merged from
+    the Flex trade aggregation when the contract appears there, since IBKR reports
+    only a single net figure per position and cannot split them; for a position
+    opened outside the Flex window those columns are left blank and the contract's
+    exchange falls back to the one IBKR reports on the position.
 
     Matching the live position to the trade aggregation is the subtle part: for
     FX, reqPositions reports contract.symbol as the bare base currency (e.g.
@@ -1729,6 +1784,36 @@ def _build_live_open_positions(live_positions, trade_rows):
         base["Net"] = round(qty, 4)         # live broker quantity wins
         if not base.get("Exchange List"):
             base["Exchange List"] = p.get("exchange", "")
+
+        # ── IBKR live portfolio figures (authoritative per-position) ──────────
+        # Unrealized PnL has no per-fill equivalent in the Flex trade history, so
+        # IBKR is the source of truth here. Realized PnL likewise comes from IBKR
+        # when it reports one, otherwise the FIFO figure from the trade history is
+        # kept. Avg cost / position value are filled from IBKR only when the Flex
+        # aggregation has no value (e.g. a position opened before the Flex window),
+        # because IBKR reports a single net figure and can't split bought vs sold.
+        upnl = p.get("unrealizedPNL")
+        if _ibkr_has(upnl):
+            base["Unrealized PnL"] = round(float(upnl), 2)
+
+        rpnl = p.get("realizedPNL")
+        if _ibkr_has(rpnl) and not base.get("PnL"):
+            base["PnL"] = round(float(rpnl), 2)
+
+        avg = p.get("averageCost")
+        if _ibkr_has(avg) and avg:
+            avg = float(avg)
+            mkt_val = p.get("marketValue")
+            total   = (round(float(mkt_val), 2) if _ibkr_has(mkt_val)
+                       else round(avg * abs(qty), 2))
+            if qty > 0 and not base.get("Avg (bought)"):
+                base["Avg (bought)"] = round(avg, 6)
+                if not base.get("Total (bought)"):
+                    base["Total (bought)"] = total
+            elif qty < 0 and not base.get("Avg (sold)"):
+                base["Avg (sold)"] = round(avg, 6)
+                if not base.get("Total (sold)"):
+                    base["Total (sold)"] = total
         rows.append(base)
     rows.sort(key=lambda x: x["Contract"])
     return rows
