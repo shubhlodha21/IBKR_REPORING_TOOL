@@ -85,6 +85,7 @@ PORT       = 7496        # 7496 live TWS | 7497 paper | 4001/4002 Gateway
 CLIENT_ID  = 998
 ORDER_WAIT = 8           # seconds to wait for open-order callbacks
 ACCT_WAIT  = 8           # seconds to wait for account-summary callbacks
+POS_WAIT   = 8           # seconds to wait for live-position callbacks
 EXEC_WAIT  = 15          # seconds to wait for executions (0.5 s timer + fills + commissions)
 
 _UNSET = (0, 1.7976931348623157e308)
@@ -137,10 +138,12 @@ class IBOrderApp(EWrapper, EClient):
         self.account_data     = {}          # tag -> (value, currency)
         self.executions       = {}          # execId -> execution dict
         self.completed_orders = []          # today's filled/cancelled orders
+        self.positions        = []          # live open positions (reqPositions)
         self._orders_done     = threading.Event()
         self._acct_done       = threading.Event()
         self._exec_done       = threading.Event()
         self._completed_done  = threading.Event()
+        self._positions_done  = threading.Event()
         self.connected_ok     = False
 
     def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
@@ -156,10 +159,32 @@ class IBOrderApp(EWrapper, EClient):
         self.connected_ok = True
         self.reqAllOpenOrders()
         self.reqAccountSummary(9001, "All", ACCOUNT_SUMMARY_TAGS)
+        # Live open positions across the account — the real broker holdings,
+        # so the Open Position sheet reflects what IBKR actually shows open
+        # rather than netting the (possibly incomplete) Flex trade history.
+        self.reqPositions()
         # Delay executions request by 0.5 s so the first two requests
         # don't congest the message loop, and set a 24-hour window so
         # pre-market fills and all intraday trades are captured.
         threading.Timer(0.5, self._req_executions).start()
+
+    # ── live open positions ───────────────────────────────────────────
+    def position(self, account, contract, position, avgCost):
+        self.positions.append({
+            "account":  account,
+            "symbol":   contract.symbol,
+            "secType":  contract.secType,
+            "currency": contract.currency,
+            "exchange": contract.exchange or contract.primaryExchange or "",
+            "name":     contract.localSymbol or contract.symbol,
+            "position": position,
+            "avgCost":  avgCost,
+        })
+
+    def positionEnd(self):
+        print(f"[TWS] positionEnd - {len(self.positions)} live position(s).")
+        self.cancelPositions()
+        self._positions_done.set()
 
     def _req_executions(self):
         # Empty filter → ALL of the current trading day's executions.
@@ -241,26 +266,37 @@ class IBOrderApp(EWrapper, EClient):
 
 def fetch_tws_data():
     """Connect to TWS once and fetch open orders, account summary, today's
-    executions, and today's completed orders."""
+    executions, today's completed orders, and live open positions.
+
+    The positions element is None when TWS could not be reached (so the Open
+    Position sheet can fall back to netting the Flex trade history); when
+    connected it is a list, which may legitimately be empty if the account is
+    currently flat."""
     app = IBOrderApp()
     try:
         app.connect(HOST, PORT, CLIENT_ID)
     except Exception as e:
         print(f"[TWS] Could not connect ({e}) - live sheets will be empty.",
               file=sys.stderr)
-        return {}, {}, {}, []
+        return {}, {}, {}, [], None
     threading.Thread(target=app.run, daemon=True).start()
     # Each feed has its own generous timeout so a slow/missing feed
     # doesn't block the others.
     app._orders_done.wait(timeout=ORDER_WAIT)
     app._acct_done.wait(timeout=ACCT_WAIT)
+    app._positions_done.wait(timeout=POS_WAIT)
     app._exec_done.wait(timeout=EXEC_WAIT)
     app._completed_done.wait(timeout=EXEC_WAIT)
     # Commission reports arrive asynchronously after execDetailsEnd;
     # give TWS extra time to push them all through before we disconnect.
     time.sleep(1.5)
     app.disconnect()
-    return app.orders_by_symbol, app.account_data, app.executions, app.completed_orders
+    # connected_ok distinguishes "connected but flat" (empty list) from
+    # "never connected" (None) so the Open Position sheet knows whether to
+    # trust the empty result or fall back to the trade-netted figures.
+    positions = app.positions if app.connected_ok else None
+    return (app.orders_by_symbol, app.account_data, app.executions,
+            app.completed_orders, positions)
 
 
 # ----------------------------------------------------------------------
@@ -1274,7 +1310,8 @@ def _load_reference_sheet_pairs():
     return src, pairs
 
 
-def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup=None):
+def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
+                order_lookup=None, live_positions=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
@@ -1359,7 +1396,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
-    _fill_running_positions_sheet(wb.create_sheet(),  rows)
+    _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
     _fill_strategy_sheet(wb.create_sheet(), carried.get("Strategy Details"))
@@ -1646,9 +1683,47 @@ def _fill_pending_sheet(ws, rows):
 
 
 # ── Open Position sheet ───────────────────────────────────────────────
-def _fill_running_positions_sheet(ws, trade_rows):
-    agg     = aggregate(trade_rows)
-    running = [r for r in agg if r["Net"] != 0]
+def _build_live_open_positions(live_positions, trade_rows):
+    """Open Position rows in the standard HEADERS format, driven by the LIVE
+    IBKR positions (reqPositions) so the sheet shows the broker's actual
+    holdings — not a netting of the (possibly incomplete) Flex trade history.
+
+    The Net column always carries IBKR's live signed quantity. The descriptive
+    columns (trade dates, buys/sells, totals, avg prices, commission, PnL) are
+    merged from the Flex trade aggregation when the contract appears there; for
+    a position opened outside the Flex window those columns are left blank and
+    the contract's exchange falls back to the one IBKR reports on the position.
+    """
+    agg_by_symbol = {r["Contract"]: r for r in aggregate(trade_rows)}
+    rows = []
+    for p in live_positions:
+        qty = p.get("position") or 0
+        if abs(qty) < 1e-9:                 # flat → not an open position
+            continue
+        base = dict(agg_by_symbol.get(p["symbol"], {}))
+        base["Contract"] = p["symbol"]
+        if not base.get("Name"):
+            base["Name"] = p.get("name", "")
+        base["Net"] = round(qty, 4)         # live broker quantity wins
+        if not base.get("Exchange List"):
+            base["Exchange List"] = p.get("exchange", "")
+        rows.append(base)
+    rows.sort(key=lambda x: x["Contract"])
+    return rows
+
+
+def _fill_running_positions_sheet(ws, trade_rows, live_positions=None):
+    """Open Position sheet. Prefers the live IBKR positions; when TWS was
+    unreachable (live_positions is None) it falls back to the previous
+    behaviour of netting buys/sells from the Flex trade history."""
+    if live_positions is not None:
+        running = _build_live_open_positions(live_positions, trade_rows)
+        src = "live IBKR positions"
+    else:
+        agg     = aggregate(trade_rows)
+        running = [r for r in agg if r["Net"] != 0]
+        src = "trade-netted (TWS unavailable)"
+    print(f"  [Open Position] {len(running)} open position(s) from {src}.")
     _fill_sheet(ws, "Open Position", running)
 
 
@@ -1864,13 +1939,15 @@ def _fill_bugs_sheet(ws, carried=None):
 
 
 def main():
-    print("Connecting to TWS - fetching open/completed orders, executions, and account summary...")
-    orders_by_symbol, account_data, executions, completed_orders = fetch_tws_data()
+    print("Connecting to TWS - fetching open/completed orders, executions, positions, and account summary...")
+    (orders_by_symbol, account_data, executions,
+     completed_orders, live_positions) = fetch_tws_data()
     pending_rows = build_pending_rows(orders_by_symbol)
     trade_rows   = build_trade_rows(executions)
     print(f"  {len(pending_rows)} pending order rows | "
           f"{len(trade_rows)} today's executions | "
           f"{len(completed_orders)} completed orders | "
+          f"{0 if live_positions is None else len(live_positions)} live positions | "
           f"{len(account_data)} account tags collected.")
 
     # Persist trigger/limit from both open AND completed orders, then build the
@@ -1889,7 +1966,8 @@ def main():
     print(f"Account: {account_id} | Parsed {len(rows)} trade records.")
     if not rows:
         print("No trades found. Check the query's date range and section config.")
-    write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup)
+    write_excel(rows, pending_rows, trade_rows, account_id, account_data,
+                order_lookup, live_positions)
 
 
 if __name__ == "__main__":

@@ -568,6 +568,20 @@ def merge_pair(live_path: Path, paper_paths, out_path: Path, report_date):
           f"(open={open_count}, trades_today={trades_today})")
 
 
+def parse_report_date(date):
+    """Parse a report date token, accepting full or abbreviated month names.
+
+    Files may be named with either the abbreviated month (``01Jul2026``) or
+    the full month (``01July2026``), so try both.
+    """
+    for fmt in ("%d%b%Y", "%d%B%Y"):
+        try:
+            return datetime.strptime(date, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Unrecognized report date format: {date!r}")
+
+
 def find_pairs(date_filter=None):
     """Yield (date, live_path, [paper_paths]) for each dated set in Reports/.
 
@@ -597,7 +611,7 @@ def main():
         papers = " + ".join(p.name for p in paper_paths)
         print(f"Merging {date}: {live_path.name} + {papers}")
         out_path = REPORTS_DIR / f"MIS_merged_{date}.xlsx"
-        report_date = datetime.strptime(date, "%d%b%Y")
+        report_date = parse_report_date(date)
         merge_pair(live_path, paper_paths, out_path, report_date)
 
     if not found:
