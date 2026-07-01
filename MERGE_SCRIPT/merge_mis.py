@@ -421,14 +421,18 @@ def add_index_row(index_ws, out_row, number, title):
         ref=desc_cell.coordinate, target=f"#'{title}'!A1", display=title)
 
 
-def paper_metrics(paper_wbs, report_date):
+def paper_metrics(paper_wbs):
     """Compute (open_trades_count, trades_taken_today) across all paper accounts.
 
     open_trades_count : total rows on every paper Open Position sheet.
-    trades_taken_today: total All Trades fills whose UTC date == report_date.
+    trades_taken_today: total All Trades fills stamped on the most recent trade
+        date present in the data. Reports are pulled at the start of ``report_date``
+        and only carry data through the previous session, so "today" is anchored
+        to the latest date the All Trades sheets actually contain (not
+        ``report_date``, which would always yield 0 for same-day fills).
     """
     open_count = 0
-    trades_today = 0
+    trade_dates = []  # (date, [rows-with-that-date])
     for wb in paper_wbs:
         if "paper_Open Position" in wb.sheetnames:
             ws = wb["paper_Open Position"]
@@ -436,8 +440,10 @@ def paper_metrics(paper_wbs, report_date):
         if "paper_All Trades" in wb.sheetnames:
             ws = wb["paper_All Trades"]
             for cells in iter_data_rows(ws, ws.max_column):
-                if parse_dt(cells[0].value).date() == report_date.date():
-                    trades_today += 1
+                trade_dates.append(parse_dt(cells[0].value).date())
+
+    latest = max(trade_dates, default=None)
+    trades_today = sum(1 for d in trade_dates if d == latest) if latest else 0
     return open_count, trades_today
 
 
@@ -559,7 +565,7 @@ def merge_pair(live_path: Path, paper_paths, out_path: Path, report_date):
 
     # Daily snapshot: compute paper metrics, update the persistent ledger, then
     # render the full (newest-first) history into the merged workbook.
-    open_count, trades_today = paper_metrics(paper_wbs, report_date)
+    open_count, trades_today = paper_metrics(paper_wbs)
     ledger = update_ledger(report_date, open_count, trades_today)
     build_snapshot_sheet(live_wb, ledger, live_wb["Open Position"])
 
