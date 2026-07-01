@@ -223,6 +223,7 @@ class IBOrderApp(EWrapper, EClient):
     # ── today's executions ────────────────────────────────────────────
     def execDetails(self, reqId, contract, execution):
         self.executions[execution.execId] = {
+            "execId":     execution.execId,   # IBKR execution ID (== Flex ibExecID)
             "account":    execution.acctNumber,
             "contract":   contract.symbol,
             "action":     "BUY" if execution.side in ("BOT", "BUY") else "SELL",
@@ -405,6 +406,24 @@ def _trade_history_key(row):
     return "|".join(str(p) for p in k)
 
 
+def _fill_identity(row):
+    """The IBKR execution ID for one fill — the SINGLE identifier that is shared,
+    byte-for-byte, by both the Flex statement (`ibExecID`) and the live TWS feed
+    (`execId`). Returns None only for legacy cached rows that predate this key,
+    so callers fall back to the coarse (date, symbol, side, qty, price)
+    fingerprint.
+
+    Keying on this true per-execution ID is what stops distinct fills that happen
+    to share the same date/side/qty/price (e.g. several 1-unit GBP buys at the
+    same rate) from collapsing into one entry, while still mapping a fill captured
+    live today to the SAME entry when Flex republishes it tomorrow."""
+    for k in ("ibExecID", "execID", "execId"):
+        v = row.get(k)
+        if v not in (None, ""):
+            return str(v)
+    return None
+
+
 def load_trade_history():
     if os.path.exists(TRADE_HISTORY_FILE):
         try:
@@ -419,15 +438,30 @@ def update_trade_history(history, rows):
     """Merge this run's trades (Flex statement + live TWS fills) into the
     persistent full-history store, keyed by fill identity.
 
+    Each fill is keyed by its IBKR execution ID (see _fill_identity) so distinct
+    fills are never collapsed and a fill re-seen across feeds/runs maps to the
+    SAME entry. Only legacy rows with no execution ID fall back to the coarse
+    fingerprint key.
+
     Never pruned. When a fill is seen again (e.g. Flex later republishes a fill
     first captured live), its richer fields are merged in WITHOUT overwriting any
     known value with a blank, and internal computed keys (e.g. _calcRealizedPnl)
     are stripped so realized P&L is always recomputed fresh across the full set.
     """
     for r in rows:
-        key   = _trade_history_key(r)
         clean = {k: v for k, v in r.items() if not k.startswith("_")}
-        old   = history.get(key)
+        eid   = _fill_identity(r)
+        if eid is not None:
+            key = "id:" + eid
+            # This fill now has a precise per-execution key. Purge any legacy entry
+            # stored under the coarse fingerprint (older runs collapsed several
+            # distinct fills into that one key) so the per-fill records replace it
+            # cleanly rather than double-counting alongside it.
+            fp = _trade_history_key(r)
+            history.pop(fp, None)
+        else:
+            key = _trade_history_key(r)
+        old = history.get(key)
         if old:
             merged = dict(old)
             for k, v in clean.items():
@@ -846,6 +880,9 @@ def _exec_to_flex_row(ex):
     fifoPnlRealized is left blank so the FIFO engine computes it."""
     comm = ex.get("commission")
     return {
+        # The live execId is the same string Flex later reports as ibExecID, so
+        # carrying it here lets a live fill and its Flex republish share one key.
+        "ibExecID":        ex.get("execId", ""),
         "symbol":          ex.get("contract", ""),
         "description":     ex.get("contract", ""),
         "buySell":         ex.get("action", ""),
@@ -875,7 +912,13 @@ def merge_live_executions(flex_rows, executions):
     trades cache (today's fills plus those captured on recent runs). Each cached
     execution the Flex statement hasn't already published (matched on date,
     contract, side, quantity and price) is appended as a Flex-style row so it
-    appears on every sheet. Returns the merged list."""
+    appears on every sheet. Returns the merged list.
+
+    A cached fill is matched to the Flex batch by IBKR execution ID (exact, and
+    shared by both feeds) when available, so several genuinely distinct fills that
+    share the same date/side/qty/price are all kept instead of being folded into
+    one. Only id-less legacy rows fall back to the coarse fingerprint match."""
+    flex_ids  = {i for i in (_fill_identity(r) for r in flex_rows) if i is not None}
     flex_keys = {
         _fill_dedup_key(r.get("symbol") or r.get("description"), r.get("buySell"),
                         r.get("quantity"), r.get("tradePrice"), parse_trade_date(r))
@@ -883,11 +926,19 @@ def merge_live_executions(flex_rows, executions):
     }
     merged = list(flex_rows)
     added  = 0
-    for ex in executions.values():
+    for exec_id, ex in executions.items():
         fr = _exec_to_flex_row(ex)
-        if _fill_dedup_key(fr["symbol"], fr["buySell"], fr["quantity"],
-                           fr["tradePrice"], parse_trade_date(fr)) in flex_keys:
-            continue                       # already in the Flex batch
+        # The trades cache is keyed by execId; recover it onto rows cached before
+        # execId was persisted, so they too dedup/key by execution ID.
+        if not fr.get("ibExecID"):
+            fr["ibExecID"] = exec_id
+        eid = _fill_identity(fr)
+        if eid is not None:
+            if eid in flex_ids:
+                continue                   # same execution already in the Flex batch
+        elif _fill_dedup_key(fr["symbol"], fr["buySell"], fr["quantity"],
+                             fr["tradePrice"], parse_trade_date(fr)) in flex_keys:
+            continue                       # legacy id-less row: fingerprint fallback
         merged.append(fr)
         added += 1
     if added:
