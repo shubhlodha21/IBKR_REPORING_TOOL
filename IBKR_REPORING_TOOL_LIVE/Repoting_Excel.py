@@ -957,16 +957,49 @@ def build_trade_rows(executions):
     return rows
 
 
-def _executions_to_flex_rows(executions):
+def build_fx_rate_map(flex_rows):
+    """currency -> fxRateToBase, harvested from the Flex trades (which carry the
+    rate) so live TWS fills — whose execution feed omits it — can still be
+    converted to USD. Keeps the rate from the most recent trade per currency,
+    since FX rates drift over time."""
+    best = {}                                   # ccy -> (date, rate)
+    for r in flex_rows:
+        ccy = (r.get("currency") or "").upper()
+        if not ccy or ccy == BASE_CURRENCY:
+            continue
+        try:
+            rate = float(r.get("fxRateToBase"))
+        except (ValueError, TypeError):
+            continue
+        if rate <= 0:
+            continue
+        d = parse_trade_date(r) or dt.date.min
+        if ccy not in best or d >= best[ccy][0]:
+            best[ccy] = (d, rate)
+    return {ccy: rate for ccy, (_d, rate) in best.items()}
+
+
+def _executions_to_flex_rows(executions, fx_rates=None):
     """Reshape this session's live TWS fills (reqExecutions) into the same
     Flex-trade dicts parse_trades produces, so today's buy/sell fills can flow
     into All Trades / Trade Summary / Open Positions before IBKR's end-of-day
-    Flex batch includes them."""
+    Flex batch includes them.
+
+    fx_rates (currency -> fxRateToBase, see build_fx_rate_map) supplies the
+    conversion rate the execution feed omits, so a non-USD fill (e.g. the JPY leg
+    of USD.JPY) is normalized to USD consistently with its Flex counterpart —
+    otherwise one leg stays in JPY and the summed PnL is nonsense."""
+    fx_rates = fx_rates or {}
     out = []
     for ex in executions.values():
         qty   = _flt(ex.get("quantity"))
         price = _flt(ex.get("price"))
         sectype = (ex.get("secType") or "").upper()
+        ccy = (ex.get("currency") or BASE_CURRENCY)
+        # Tag the fill with the rate for its currency so normalize_trades_to_usd
+        # converts it. USD legs keep 1.0; a missing rate falls back to 1.0 (the
+        # fill stays native until the Flex batch, which carries the rate, lands).
+        rate = fx_rates.get(ccy.upper()) if ccy.upper() != BASE_CURRENCY else None
         # For FX, Flex keys the trade by the pair (localSymbol, e.g. "EUR.USD"),
         # not the bare base currency; use it so the symbol, dedup key, and CASH
         # detection all match the Flex history.
@@ -985,23 +1018,24 @@ def _executions_to_flex_rows(executions):
             "fifoPnlRealized": 0.0,           # not carried by the execution feed
             "exchange":        ex.get("exchange") or "",
             "dateTime":        str(ex.get("time") or ""),
-            "currency":        ex.get("currency") or BASE_CURRENCY,
+            "currency":        ccy,
+            "fxRateToBase":    rate,          # None -> normalize treats as 1.0
             "orderType":       "",
             "accountId":       ex.get("account") or "",
-            # The execution feed carries no fxRateToBase, so USD fills pass through
-            # unchanged while non-USD today-fills stay in native currency until the
-            # next run's Flex batch (which carries the rate) supersedes them.
         })
     return out
 
 
-def merge_todays_executions(flex_rows, executions):
+def merge_todays_executions(flex_rows, executions, fx_rates=None):
     """Splice live TWS fills (this session's + every prior day's, from the trades
     ledger) into the Flex trade rows in place. A fill is skipped only when the
     Flex batch already contains an equivalent trade (matched on
     date/symbol/side/qty/price), so nothing is double-counted once Flex catches
     up — but two genuinely-identical fills on the same day are both kept, because
-    each carries a distinct IBKR execId."""
+    each carries a distinct IBKR execId.
+
+    fx_rates (see build_fx_rate_map) converts non-USD fills to USD, so a live leg
+    (e.g. today's JPY sell of USD.JPY) is on the same footing as its Flex leg."""
     if not executions:
         return flex_rows
 
@@ -1016,7 +1050,7 @@ def merge_todays_executions(flex_rows, executions):
     # already unique by execId, so we must not suppress a second identical fill.
     flex_keys = {_key(r) for r in flex_rows}
     added = 0
-    for r in _executions_to_flex_rows(executions):
+    for r in _executions_to_flex_rows(executions, fx_rates):
         if _key(r) not in flex_keys:
             flex_rows.append(r)
             added += 1
@@ -2339,10 +2373,14 @@ def main():
     ref        = send_request()
     xml_text   = get_statement(ref)
     rows       = parse_trades(xml_text)
+    # Harvest FX rates from the Flex trades (which carry fxRateToBase) BEFORE
+    # normalization overwrites their currency, so live fills can be converted to
+    # USD using the same rates.
+    fx_rates = build_fx_rate_map(rows)
     # Splice in live TWS fills — this session's plus every prior day's from the
     # trades ledger. IBKR's Flex batch lags ~a day and reqExecutions only returns
     # the current day, so this is what guarantees every day's orders are present.
-    merge_todays_executions(rows, trades_ledger)
+    merge_todays_executions(rows, trades_ledger, fx_rates)
     # Express every trade in the base currency (USD) so the report never mixes
     # currencies, even when the account holds FX pairs or non-USD instruments.
     normalize_trades_to_usd(rows)
