@@ -289,15 +289,21 @@ class IBOrderApp(EWrapper, EClient):
     # ── today's executions ────────────────────────────────────────────
     def execDetails(self, reqId, contract, execution):
         self.executions[execution.execId] = {
-            "account":    execution.acctNumber,
-            "contract":   contract.symbol,
-            "action":     "BUY" if execution.side in ("BOT", "BUY") else "SELL",
-            "quantity":   execution.shares,
-            "price":      execution.price,
-            "currency":   contract.currency,
-            "exchange":   execution.exchange,
-            "time":       execution.time,
-            "commission": None,             # filled in by commissionReport
+            "account":     execution.acctNumber,
+            "contract":    contract.symbol,
+            # localSymbol is the tradeable instrument as Flex reports it — for FX
+            # it's the pair ("EUR.USD") vs. the bare base ("EUR") in contract.symbol,
+            # so today's live FX fills line up with the Flex trade history.
+            "localSymbol": contract.localSymbol or contract.symbol,
+            "secType":     contract.secType,
+            "conId":       contract.conId,
+            "action":      "BUY" if execution.side in ("BOT", "BUY") else "SELL",
+            "quantity":    execution.shares,
+            "price":       execution.price,
+            "currency":    contract.currency,
+            "exchange":    execution.exchange,
+            "time":        execution.time,
+            "commission":  None,            # filled in by commissionReport
         }
 
     def commissionReport(self, commissionReport):
@@ -908,6 +914,69 @@ def build_trade_rows(executions):
     return rows
 
 
+def _executions_to_flex_rows(executions):
+    """Reshape this session's live TWS fills (reqExecutions) into the same
+    Flex-trade dicts parse_trades produces, so today's buy/sell fills can flow
+    into All Trades / Trade Summary / Open Positions before IBKR's end-of-day
+    Flex batch includes them."""
+    out = []
+    for ex in executions.values():
+        qty   = _flt(ex.get("quantity"))
+        price = _flt(ex.get("price"))
+        sectype = (ex.get("secType") or "").upper()
+        # For FX, Flex keys the trade by the pair (localSymbol, e.g. "EUR.USD"),
+        # not the bare base currency; use it so the symbol, dedup key, and CASH
+        # detection all match the Flex history.
+        symbol = (ex.get("localSymbol") or ex.get("contract") or ""
+                  ) if sectype == "CASH" else (ex.get("contract") or "")
+        out.append({
+            "symbol":          symbol,
+            "description":     ex.get("localSymbol") or "",
+            "assetCategory":   sectype,       # STK/CASH/OPT/... — drives CASH handling
+            "conid":           ex.get("conId"),
+            "buySell":         (ex.get("action") or "").upper(),
+            "quantity":        qty,
+            "tradePrice":      price,
+            "tradeMoney":      qty * price,
+            "ibCommission":    ex.get("commission"),
+            "fifoPnlRealized": 0.0,           # not carried by the execution feed
+            "exchange":        ex.get("exchange") or "",
+            "dateTime":        str(ex.get("time") or ""),
+            "currency":        ex.get("currency") or BASE_CURRENCY,
+            "orderType":       "",
+            "accountId":       ex.get("account") or "",
+            # The execution feed carries no fxRateToBase, so USD fills pass through
+            # unchanged while non-USD today-fills stay in native currency until the
+            # next run's Flex batch (which carries the rate) supersedes them.
+        })
+    return out
+
+
+def merge_todays_executions(flex_rows, executions):
+    """Add today's live fills to the Flex trade rows in place, skipping any fill
+    already present in the Flex data (matched on date/symbol/side/qty/price) so a
+    trade isn't double-counted once IBKR's Flex batch catches up."""
+    if not executions:
+        return flex_rows
+
+    def _key(r):
+        return (parse_trade_date(r),
+                (r.get("symbol") or "").upper(),
+                (r.get("buySell") or "").upper()[:1],       # B(UY)/B(OT), S(ELL)/S(LD)
+                round(_flt(r.get("quantity")),   4),
+                round(_flt(r.get("tradePrice")), 6))
+
+    existing = {_key(r) for r in flex_rows}
+    added = 0
+    for r in _executions_to_flex_rows(executions):
+        if _key(r) not in existing:
+            flex_rows.append(r)
+            existing.add(_key(r))
+            added += 1
+    print(f"  [Today's fills] merged {added} live execution(s) not yet in the Flex batch.")
+    return flex_rows
+
+
 # ----------------------------------------------------------------------
 # STEP 1: request the statement -> reference code
 # ----------------------------------------------------------------------
@@ -1023,6 +1092,72 @@ def normalize_trades_to_usd(trade_rows):
         # mistakes the row for its original currency.
         r["currency"] = BASE_CURRENCY
     return trade_rows
+
+
+def parse_open_positions(xml_text):
+    """Authoritative open positions from the Flex statement's <OpenPosition>
+    section.
+
+    Netting the trade history alone (aggregate) misses any position whose opening
+    trades fall outside the statement's date range, so we read IBKR's own open-
+    position snapshot instead. Returns [] when the query has no OpenPosition
+    section configured, in which case the caller falls back to trade netting."""
+    root = ET.fromstring(xml_text)
+    return [dict(op.attrib) for op in root.findall(".//OpenPosition")]
+
+
+def _flex_open_to_position(op):
+    """Map a Flex <OpenPosition> record onto the same position-dict shape the live
+    reqPositions/updatePortfolio feed produces, so _build_live_open_positions can
+    consume either source. Monetary fields are converted to the base currency
+    (USD); per-unit prices are converted for non-FX instruments only (see
+    normalize_trades_to_usd for the same rule)."""
+    rate    = _fx_rate_to_base(op)
+    is_cash = (op.get("assetCategory") or "").upper() == "CASH"
+
+    def _money(key):
+        v = op.get(key)
+        if v in (None, ""):
+            return None
+        try:
+            return float(v) * rate
+        except (ValueError, TypeError):
+            return None
+
+    def _price(key):
+        v = op.get(key)
+        if v in (None, ""):
+            return None
+        try:
+            f = float(v)
+        except (ValueError, TypeError):
+            return None
+        return f * rate if not is_cash else f      # FX 'price' is a quote, not money
+
+    try:
+        qty = float(op.get("position") or 0)
+    except (ValueError, TypeError):
+        qty = 0.0
+    try:
+        conid = int(float(op.get("conid"))) if op.get("conid") else None
+    except (ValueError, TypeError):
+        conid = None
+
+    return {
+        "conId":         conid,
+        "symbol":        op.get("symbol") or "",
+        "secType":       op.get("assetCategory") or "",
+        # Keep the position's own (quote) currency: _build_live_open_positions
+        # uses it solely to build the FX pair for matching, exactly as the live
+        # reqPositions feed reports it (e.g. USD.JPY -> symbol USD, currency JPY).
+        "currency":      op.get("currency") or "",
+        "name":          op.get("description") or op.get("symbol") or "",
+        "exchange":      op.get("listingExchange") or op.get("exchange") or "",
+        "position":      qty,
+        "averageCost":   _price("costBasisPrice") or _price("openPrice"),
+        "marketValue":   _money("positionValue"),
+        "unrealizedPNL": _money("fifoPnlUnrealized"),
+    }
 
 
 def parse_account_id(xml_text):
@@ -1430,7 +1565,7 @@ def _load_reference_sheet_pairs():
 
 
 def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
-                order_lookup=None, live_positions=None):
+                order_lookup=None, live_positions=None, flex_positions=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
@@ -1515,7 +1650,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
-    _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions)
+    _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions, flex_positions)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
     _fill_strategy_sheet(wb.create_sheet(), carried.get("Strategy Details"))
@@ -1884,17 +2019,30 @@ def _build_live_open_positions(live_positions, trade_rows):
     return rows
 
 
-def _fill_running_positions_sheet(ws, trade_rows, live_positions=None):
-    """Open Position sheet. Prefers the live IBKR positions; when TWS was
-    unreachable (live_positions is None) it falls back to the previous
-    behaviour of netting buys/sells from the Flex trade history."""
-    if live_positions is not None:
+def _fill_running_positions_sheet(ws, trade_rows, live_positions=None,
+                                  flex_positions=None):
+    """Open Position sheet, sourced in priority order:
+
+      1. Live IBKR positions (reqPositions) — real-time broker truth.
+      2. Flex <OpenPosition> snapshot — authoritative when TWS is unreachable OR
+         returns nothing (a slow/empty live feed no longer blanks the sheet).
+      3. Netting the Flex trade history — last resort; only correct when the
+         statement's date range covers each position's opening trades.
+    """
+    flex_open = [p for p in (_flex_open_to_position(op) for op in (flex_positions or []))
+                 if abs(p.get("position") or 0) > 1e-9]
+
+    if live_positions:                              # connected AND holding positions
         running = _build_live_open_positions(live_positions, trade_rows)
         src = "live IBKR positions"
+    elif flex_open:                                 # TWS down or returned none
+        running = _build_live_open_positions(flex_open, trade_rows)
+        why = "TWS unavailable" if live_positions is None else "TWS returned no positions"
+        src = f"Flex open positions ({why})"
     else:
         agg     = aggregate(trade_rows)
         running = [r for r in agg if r["Net"] != 0]
-        src = "trade-netted (TWS unavailable)"
+        src = "trade-netted (no live or Flex positions)"
     print(f"  [Open Position] {len(running)} open position(s) from {src}.")
     _fill_sheet(ws, "Open Position", running)
 
@@ -2134,16 +2282,24 @@ def main():
     ref        = send_request()
     xml_text   = get_statement(ref)
     rows       = parse_trades(xml_text)
+    # Splice in today's live fills from TWS: IBKR's Flex batch lags ~a day, so
+    # without this today's buy/sell trades are missing from All Trades / Trade
+    # Summary / Open Positions until tomorrow's run.
+    merge_todays_executions(rows, executions)
     # Express every trade in the base currency (USD) so the report never mixes
     # currencies, even when the account holds FX pairs or non-USD instruments.
     normalize_trades_to_usd(rows)
+    # Authoritative open positions from the Flex statement — used for the Open
+    # Position sheet when the live TWS feed is unavailable or returns nothing.
+    open_positions = parse_open_positions(xml_text)
     account_id = parse_account_id(xml_text)
     print(f"Account: {account_id} | Parsed {len(rows)} trade records "
-          f"(monetary values normalized to {BASE_CURRENCY}).")
+          f"(monetary values normalized to {BASE_CURRENCY}) | "
+          f"{len(open_positions)} Flex open position(s).")
     if not rows:
         print("No trades found. Check the query's date range and section config.")
     write_excel(rows, pending_rows, trade_rows, account_id, account_data,
-                order_lookup, live_positions)
+                order_lookup, live_positions, open_positions)
 
 
 if __name__ == "__main__":
