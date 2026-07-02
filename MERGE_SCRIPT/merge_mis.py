@@ -32,10 +32,12 @@ Merge rules
                                  column), Sr No renumbered.
     - paper_Dashboard         -> numeric parameters summed across paper accounts;
                                  text fields kept from the first account.
-* A Daywize_Snapshot sheet (Index item 16) holds one row per report date,
-  newest first: Open Trades Count and No. of Trades taken Today are computed
-  from the combined paper data; Bugs Found/Fixed default to 0. Rows accumulate
-  across days via a persistent Daywize_Snapshot.xlsx ledger beside this script.
+* A Daywize_Snapshot sheet (Index item 16) holds one row per trade date found
+  in the pooled paper_All Trades data, newest first: Open Trades Count is the
+  running cumulative fill count up to and including that date, No. of Trades
+  taken Today is the fill count on that date alone; Bugs Found/Fixed default to
+  0. Rows accumulate across days via a persistent Daywize_Snapshot.xlsx ledger
+  beside this script (bug counts entered there are preserved).
 
 Usage
 -----
@@ -189,46 +191,143 @@ def rename_paper_title(title, prefix):
     return title
 
 
-def append_paper_index_rows(index_ws, paper_index_ws, prefix, out_row, next_number):
-    """Append one paper account's item rows below the current Index list.
+def collect_index_titles(index_ws, paper_index_ws):
+    """Build the ordered Index item titles for the merged workbook.
 
-    Continues the serial numbering from ``next_number`` at row ``out_row`` and
-    returns the (next free row, next serial number) after the appended rows.
+    Order: live "current" sheets first, then the combined paper sheets, then the
+    Daywize snapshot, then the archived "... old AC" sheets pushed to the bottom.
+    Every title equals its sheet name, so each Index row can link straight to it.
     """
-    si_template = index_ws[f"{SI_COL}{LIVE_LAST_ITEM_ROW}"]
-    desc_template = index_ws[f"{DESC_COL}{LIVE_LAST_ITEM_ROW}"]
+    live_titles = [
+        str(index_ws[f"{DESC_COL}{r}"].value)
+        for r in range(LIVE_FIRST_ITEM_ROW, LIVE_LAST_ITEM_ROW + 1)
+        if index_ws[f"{DESC_COL}{r}"].value is not None
+    ]
+    current = [t for t in live_titles if not t.endswith("old AC")]
+    old_ac = [t for t in live_titles if t.endswith("old AC")]
 
-    for src_row in range(PAPER_FIRST_ITEM_ROW, PAPER_LAST_ITEM_ROW + 1):
-        desc = paper_index_ws[f"{DESC_COL}{src_row}"].value
+    paper_titles = []
+    for r in range(PAPER_FIRST_ITEM_ROW, PAPER_LAST_ITEM_ROW + 1):
+        desc = paper_index_ws[f"{DESC_COL}{r}"].value
         if desc is None:
             continue
-        if str(desc) in EXCLUDED_PAPER_SHEETS:
+        title = rename_paper_title(str(desc), "paper_")
+        if title in EXCLUDED_PAPER_SHEETS:
             continue
-        desc = rename_paper_title(str(desc), prefix)
+        paper_titles.append(title)
 
-        si_cell = index_ws[f"{SI_COL}{out_row}"]
-        copy_cell_style(si_template, si_cell)
-        si_cell.value = next_number
+    return current + paper_titles + [SNAPSHOT_SHEET] + old_ac
 
-        desc_cell = index_ws[f"{DESC_COL}{out_row}"]
-        copy_cell_style(desc_template, desc_cell)
-        desc_cell.value = desc
-        # Internal link to the matching sheet (description text == sheet name),
-        # mirroring how the live Index rows store their links.
-        desc_cell.hyperlink = Hyperlink(
-            ref=desc_cell.coordinate, target=f"#'{desc}'!A1", display=str(desc),
-        )
 
-        # match the source row height if it was customised
-        if src_row in paper_index_ws.row_dimensions:
-            index_ws.row_dimensions[out_row].height = (
-                paper_index_ws.row_dimensions[src_row].height
-            )
+def write_index_items(index_ws, titles):
+    """(Re)write the Index item list (serial + linked description) top-to-bottom.
 
-        next_number += 1
-        out_row += 1
+    Overwrites the live item rows in place from ``LIVE_FIRST_ITEM_ROW`` down so
+    the merged Index carries every sheet in ``titles`` order, each numbered 1..N
+    and hyperlinked to its sheet.
+    """
+    for i, title in enumerate(titles):
+        add_index_row(index_ws, LIVE_FIRST_ITEM_ROW + i, i + 1, title)
 
-    return out_row, next_number
+
+def reorder_sheets(wb, titles):
+    """Arrange the workbook tabs as Index, then ``titles``, matching the Index list.
+
+    Any sheet not named in ``titles`` (there should be none) is kept, appended
+    after the ordered ones so nothing is ever dropped.
+    """
+    order = ["Index"] + [t for t in titles if t in wb.sheetnames]
+    order += [name for name in wb.sheetnames if name not in order]
+    wb._sheets = [wb[name] for name in order]
+
+
+def _is_srno_header(value):
+    """True if a header cell already labels a serial-number column ("Sr No" etc.)."""
+    return (value is not None
+            and "".join(str(value).split()).lower().replace(".", "") == "srno")
+
+
+def _last_data_row(ws, n_cols):
+    """Row index of the last non-blank data row (>= header), or header row if none."""
+    for r in range(ws.max_row, DATA_START_ROW - 1, -1):
+        if any(ws.cell(r, c).value not in (None, "") for c in range(1, n_cols + 1)):
+            return r
+    return DATA_START_ROW - 1
+
+
+def add_srno_and_filter(ws):
+    """Ensure column A is a "Sr No" serial column and the sheet has an autofilter.
+
+    Sheets use the title(row1)/header(row2)/data(row3+) layout with a single
+    banner merge on row 1. When column A is not already a Sr No column, a new one
+    is inserted: every header/data cell shifts one column right (values + styles),
+    the banner merge and column widths shift with them, and data rows are numbered
+    1..N. Sheets that already lead with Sr No keep their numbering; either way an
+    autofilter is applied over the header + data.
+    """
+    header_row = DATA_START_ROW - 1  # row 2
+
+    if _is_srno_header(ws.cell(header_row, 1).value):
+        if ws.auto_filter.ref is None:
+            last = _last_data_row(ws, ws.max_column)
+            if last >= DATA_START_ROW:
+                ws.auto_filter.ref = (
+                    f"A{header_row}:{get_column_letter(ws.max_column)}{last}")
+        return
+
+    last_col = ws.max_column
+    last_row = ws.max_row
+
+    # Drop the row-1 banner merge so it can be re-anchored after the shift.
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
+
+    # Shift every header/data cell (rows 2+) one column to the right.
+    for col in range(last_col, 0, -1):
+        for row in range(header_row, last_row + 1):
+            src = ws.cell(row, col)
+            dst = ws.cell(row, col + 1)
+            dst.value = src.value
+            dst._style = copy.copy(src._style)
+
+    # Clear the vacated column A (rows 2+), styled like its new neighbour but
+    # with a General number format so serial ints don't inherit a date/number
+    # format from the adjacent column (e.g. the Activity sheets' Date column).
+    for row in range(header_row, last_row + 1):
+        cell = ws.cell(row, 1)
+        cell.value = None
+        cell._style = copy.copy(ws.cell(row, 2)._style)
+        cell.number_format = "General"
+
+    ws.cell(header_row, 1).value = "Sr No"
+
+    srno = 0
+    for row in range(DATA_START_ROW, last_row + 1):
+        if any(ws.cell(row, c).value not in (None, "") for c in range(2, last_col + 2)):
+            srno += 1
+            ws.cell(row, 1).value = srno
+
+    # Shift column widths / hidden flags one column right; narrow the Sr No column.
+    widths = {}
+    for c in range(1, last_col + 1):
+        letter = get_column_letter(c)
+        if letter in ws.column_dimensions:
+            dim = ws.column_dimensions[letter]
+            widths[c] = (dim.width, dim.hidden)
+    for c in range(last_col, 0, -1):
+        if c in widths:
+            width, hidden = widths[c]
+            tgt = ws.column_dimensions[get_column_letter(c + 1)]
+            tgt.width, tgt.hidden = width, hidden
+    ws.column_dimensions["A"].width = 6
+    ws.column_dimensions["A"].hidden = False
+
+    # Re-anchor the banner across the full width, including the new column.
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col + 1)
+
+    last = _last_data_row(ws, last_col + 1)
+    if last >= DATA_START_ROW:
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(last_col + 1)}{last}"
 
 
 def copy_box(src_ws, dst_ws, src_range, dst_top_row):
@@ -417,34 +516,40 @@ def add_index_row(index_ws, out_row, number, title):
     desc_cell = index_ws[f"{DESC_COL}{out_row}"]
     copy_cell_style(desc_template, desc_cell)
     desc_cell.value = title
+    # Native in-workbook link (location, no relationship) exactly as the live
+    # Index stores its links, so clicking jumps straight to the sheet.
     desc_cell.hyperlink = Hyperlink(
-        ref=desc_cell.coordinate, target=f"#'{title}'!A1", display=title)
+        ref=desc_cell.coordinate, location=f"'{title}'!A1", display=title)
 
 
-def paper_metrics(paper_wbs):
-    """Compute (open_trades_count, trades_taken_today) across all paper accounts.
+def paper_daily_metrics(paper_wbs):
+    """Per trade-date fill counts pooled across all paper accounts.
 
-    open_trades_count : total rows on every paper Open Position sheet.
-    trades_taken_today: total All Trades fills stamped on the most recent trade
-        date present in the data. Reports are pulled at the start of ``report_date``
-        and only carry data through the previous session, so "today" is anchored
-        to the latest date the All Trades sheets actually contain (not
-        ``report_date``, which would always yield 0 for same-day fills).
+    Reads every paper_All Trades sheet (Date & Time UTC in column 1), tallies
+    fills per trade date, then returns an ordered dict
+    {date_str: [open_cumulative, trades_today]} where date_str is 'DD-Mon-YYYY'.
+    ``open_cumulative`` is the running total of all fills up to and including that
+    date (oldest to newest); ``trades_today`` is the fill count on that date
+    alone.
     """
-    open_count = 0
-    trade_dates = []  # (date, [rows-with-that-date])
+    per_day = {}  # date -> fill count on that date
     for wb in paper_wbs:
-        if "paper_Open Position" in wb.sheetnames:
-            ws = wb["paper_Open Position"]
-            open_count += sum(1 for _ in iter_data_rows(ws, ws.max_column))
-        if "paper_All Trades" in wb.sheetnames:
-            ws = wb["paper_All Trades"]
-            for cells in iter_data_rows(ws, ws.max_column):
-                trade_dates.append(parse_dt(cells[0].value).date())
+        if "paper_All Trades" not in wb.sheetnames:
+            continue
+        ws = wb["paper_All Trades"]
+        for cells in iter_data_rows(ws, ws.max_column):
+            dt = parse_dt(cells[0].value)
+            if dt == datetime.min:
+                continue
+            day = dt.date()
+            per_day[day] = per_day.get(day, 0) + 1
 
-    latest = max(trade_dates, default=None)
-    trades_today = sum(1 for d in trade_dates if d == latest) if latest else 0
-    return open_count, trades_today
+    metrics = {}
+    cumulative = 0
+    for day in sorted(per_day):
+        cumulative += per_day[day]
+        metrics[day.strftime("%d-%b-%Y")] = [cumulative, per_day[day]]
+    return metrics
 
 
 def load_ledger():
@@ -478,14 +583,14 @@ def save_ledger(ledger):
     wb.save(SNAPSHOT_FILE)
 
 
-def update_ledger(report_date, open_count, trades_today):
-    """Upsert today's row; keep any bug counts already entered for that date."""
+def update_ledger(daily_metrics):
+    """Upsert one row per trade date; keep any bug counts already entered."""
     ledger = load_ledger()
-    key = report_date.strftime("%d-%b-%Y")
-    prior = ledger.get(key)
-    bugs_found = prior[2] if prior and prior[2] is not None else 0
-    bugs_fixed = prior[3] if prior and prior[3] is not None else 0
-    ledger[key] = [open_count, trades_today, bugs_found, bugs_fixed]
+    for key, (open_cum, trades_today) in daily_metrics.items():
+        prior = ledger.get(key)
+        bugs_found = prior[2] if prior and prior[2] is not None else 0
+        bugs_fixed = prior[3] if prior and prior[3] is not None else 0
+        ledger[key] = [open_cum, trades_today, bugs_found, bugs_fixed]
     save_ledger(ledger)
     return ledger
 
@@ -522,7 +627,7 @@ def build_snapshot_sheet(dst_wb, ledger, template_ws):
     return dst
 
 
-def merge_pair(live_path: Path, paper_paths, out_path: Path, report_date):
+def merge_pair(live_path: Path, paper_paths, out_path: Path):
     live_wb = openpyxl.load_workbook(live_path)
     index_ws = live_wb["Index"]
 
@@ -530,15 +635,11 @@ def merge_pair(live_path: Path, paper_paths, out_path: Path, report_date):
     ordered_paths = sorted(paper_paths, key=lambda p: (paper_label(p) != "", paper_label(p)))
     paper_wbs = [openpyxl.load_workbook(p) for p in ordered_paths]
 
-    # Index list: append ONE combined set of paper rows (paper_Dashboard, ...),
-    # taken from the first account's paper_Index and renumbered 11, 12, ...
-    out_row = LIVE_LAST_ITEM_ROW + 1
-    next_number = index_ws[f"{SI_COL}{LIVE_LAST_ITEM_ROW}"].value + 1  # 11
-    out_row, next_number = append_paper_index_rows(
-        index_ws, paper_wbs[0]["paper_Index"], "paper_", out_row, next_number)
-
-    # Index item for the daily snapshot sheet (item 16, after the paper rows).
-    add_index_row(index_ws, out_row, next_number, SNAPSHOT_SHEET)
+    # Rebuild the whole Index item list in the fixed presentation order: live
+    # current sheets, the combined paper sheets, the Daywize snapshot, then the
+    # archived "old AC" sheets at the bottom. Each row links to its sheet.
+    index_titles = collect_index_titles(index_ws, paper_wbs[0]["paper_Index"])
+    write_index_items(index_ws, index_titles)
 
     # Detail boxes: stack every paper account's Report + Login boxes (cols E-F)
     # so all credentials are retained, below the live Login box.
@@ -563,29 +664,27 @@ def merge_pair(live_path: Path, paper_paths, out_path: Path, report_date):
         else:
             build_stacked_sheet(live_wb, title, sources, sort_col, srno_col)
 
-    # Daily snapshot: compute paper metrics, update the persistent ledger, then
-    # render the full (newest-first) history into the merged workbook.
-    open_count, trades_today = paper_metrics(paper_wbs)
-    ledger = update_ledger(report_date, open_count, trades_today)
+    # Daily snapshot: tally per-trade-date fill counts from the pooled paper
+    # All Trades data, update the persistent ledger, then render the full
+    # (newest-first) history into the merged workbook.
+    daily = paper_daily_metrics(paper_wbs)
+    ledger = update_ledger(daily)
     build_snapshot_sheet(live_wb, ledger, live_wb["Open Position"])
 
+    # Give every data sheet a Sr No first column + autofilter (Index excepted).
+    for ws in live_wb.worksheets:
+        if ws.title != "Index":
+            add_srno_and_filter(ws)
+
+    # Order the sheet tabs to match the Index list (Index first).
+    reorder_sheets(live_wb, index_titles)
+
     live_wb.save(out_path)
+    latest = max(daily, key=parse_dt, default=None)
+    open_cum, trades_today = daily[latest] if latest else (0, 0)
     print(f"  merged -> {out_path.name}  "
-          f"(open={open_count}, trades_today={trades_today})")
-
-
-def parse_report_date(date):
-    """Parse a report date token, accepting full or abbreviated month names.
-
-    Files may be named with either the abbreviated month (``01Jul2026``) or
-    the full month (``01July2026``), so try both.
-    """
-    for fmt in ("%d%b%Y", "%d%B%Y"):
-        try:
-            return datetime.strptime(date, fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"Unrecognized report date format: {date!r}")
+          f"(dates={len(daily)}, cumulative={open_cum}, "
+          f"latest={latest}, trades_today={trades_today})")
 
 
 def find_pairs(date_filter=None):
@@ -617,8 +716,7 @@ def main():
         papers = " + ".join(p.name for p in paper_paths)
         print(f"Merging {date}: {live_path.name} + {papers}")
         out_path = REPORTS_DIR / f"MIS_merged_{date}.xlsx"
-        report_date = parse_report_date(date)
-        merge_pair(live_path, paper_paths, out_path, report_date)
+        merge_pair(live_path, paper_paths, out_path)
 
     if not found:
         target = date_filter or "any date"

@@ -960,6 +960,71 @@ def parse_trades(xml_text):
     return [dict(t.attrib) for t in trades]
 
 
+# Base (reporting) currency — every monetary figure in the report is expressed
+# in this currency. IBKR Flex tags each trade with fxRateToBase, the rate that
+# converts a value from the trade's own currency into the account base currency.
+BASE_CURRENCY = "USD"
+
+# Monetary trade fields denominated in the trade's own currency. These are the
+# amounts that must be scaled by fxRateToBase so the whole report reads in USD.
+_MONEY_FIELDS = (
+    "tradeMoney", "proceeds", "netCash", "cost", "closePrice",
+    "ibCommission", "commission", "taxes",
+    "fifoPnlRealized", "fifoPnlUnrealized", "mtmPnl", "unrealizedPnl",
+)
+
+
+def _fx_rate_to_base(row):
+    """Rate that converts this trade's currency amounts into the base currency.
+
+    Returns 1.0 when the trade is already in the base currency or when IBKR did
+    not supply a usable rate (so values pass through unchanged)."""
+    if (row.get("currency") or BASE_CURRENCY).upper() == BASE_CURRENCY:
+        return 1.0
+    try:
+        rate = float(row.get("fxRateToBase"))
+    except (ValueError, TypeError):
+        return 1.0
+    # IBKR uses 0/blank as "no rate"; never scale by an invalid factor.
+    return rate if rate > 0 else 1.0
+
+
+def normalize_trades_to_usd(trade_rows):
+    """Convert every trade's monetary fields into the base currency (USD) in place.
+
+    IBKR Flex reports FX pairs (e.g. USD.JPY) and non-USD instruments with their
+    money/PnL/commission fields in the instrument's own currency. Scaling each of
+    those by fxRateToBase yields a single-currency (USD) report. Per-unit prices
+    (tradePrice) are converted for non-FX instruments so a non-USD stock shows a
+    USD price; for FX (assetCategory CASH) the 'price' is an exchange rate, not a
+    money amount, so it is left as quoted."""
+    for r in trade_rows:
+        rate = _fx_rate_to_base(r)
+        if rate == 1.0:
+            continue
+        for field in _MONEY_FIELDS:
+            raw = r.get(field)
+            if raw in (None, ""):
+                continue
+            try:
+                r[field] = float(raw) * rate
+            except (ValueError, TypeError):
+                continue
+        # tradePrice: a genuine per-share price for stocks/options (convert to
+        # USD), but an FX quote for CASH pairs (leave alone).
+        if (r.get("assetCategory") or "").upper() != "CASH":
+            tp = r.get("tradePrice")
+            if tp not in (None, ""):
+                try:
+                    r["tradePrice"] = float(tp) * rate
+                except (ValueError, TypeError):
+                    pass
+        # Now expressed in base currency — reflect that so nothing downstream
+        # mistakes the row for its original currency.
+        r["currency"] = BASE_CURRENCY
+    return trade_rows
+
+
 def parse_account_id(xml_text):
     root = ET.fromstring(xml_text)
     stmt = root.find(".//FlexStatement")
@@ -2069,8 +2134,12 @@ def main():
     ref        = send_request()
     xml_text   = get_statement(ref)
     rows       = parse_trades(xml_text)
+    # Express every trade in the base currency (USD) so the report never mixes
+    # currencies, even when the account holds FX pairs or non-USD instruments.
+    normalize_trades_to_usd(rows)
     account_id = parse_account_id(xml_text)
-    print(f"Account: {account_id} | Parsed {len(rows)} trade records.")
+    print(f"Account: {account_id} | Parsed {len(rows)} trade records "
+          f"(monetary values normalized to {BASE_CURRENCY}).")
     if not rows:
         print("No trades found. Check the query's date range and section config.")
     write_excel(rows, pending_rows, trade_rows, account_id, account_data,
