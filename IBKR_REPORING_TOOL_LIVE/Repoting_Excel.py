@@ -71,6 +71,13 @@ OLD_REFERENCE_SHEETS = [
 _BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 LEDGER_FILE = os.path.join(_BASE_DIR, "orders_ledger.json")
 
+# Persistent trades ledger — accumulates EVERY live TWS execution (fill) across
+# runs, keyed by IBKR's unique execId. IBKR's reqExecutions only returns the
+# current day and only while TWS is connected, and the Flex batch lags ~a day, so
+# without this a missed/late run would lose that day's orders permanently. With
+# it, every day's fills are captured the moment they're seen and always shown.
+TRADES_LEDGER_FILE = os.path.join(_BASE_DIR, "trades_ledger.json")
+
 BASE     = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
 SEND_URL = f"{BASE}/SendRequest"
 GET_URL  = f"{BASE}/GetStatement"
@@ -419,6 +426,42 @@ def save_order_ledger(ledger):
             json.dump(ledger, f, indent=2)
     except OSError as e:
         print(f"[ledger] could not save: {e}", file=sys.stderr)
+
+
+# ----------------------------------------------------------------------
+# Persistent trades ledger: accumulate every live TWS execution across runs so
+# no day's orders are ever lost (see TRADES_LEDGER_FILE note above).
+# ----------------------------------------------------------------------
+def load_trades_ledger():
+    if os.path.exists(TRADES_LEDGER_FILE):
+        try:
+            with open(TRADES_LEDGER_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            print("[trades ledger] existing ledger unreadable - starting fresh.",
+                  file=sys.stderr)
+    return {}
+
+
+def update_trades_ledger(ledger, executions):
+    """Merge this session's live TWS fills into the persistent trades ledger,
+    keyed by IBKR's unique execId. Existing entries are refreshed (e.g. a
+    commission that arrived after the first capture) rather than duplicated."""
+    today = dt.date.today().isoformat()
+    for exec_id, ex in (executions or {}).items():
+        rec = ledger.get(exec_id, {})
+        rec.update(ex)                      # latest values win (e.g. commission)
+        rec.setdefault("captured_date", today)
+        ledger[exec_id] = rec
+    return ledger
+
+
+def save_trades_ledger(ledger):
+    try:
+        with open(TRADES_LEDGER_FILE, "w", encoding="utf-8") as f:
+            json.dump(ledger, f, indent=2)
+    except OSError as e:
+        print(f"[trades ledger] could not save: {e}", file=sys.stderr)
 
 
 def build_order_lookup(ledger):
@@ -953,9 +996,12 @@ def _executions_to_flex_rows(executions):
 
 
 def merge_todays_executions(flex_rows, executions):
-    """Add today's live fills to the Flex trade rows in place, skipping any fill
-    already present in the Flex data (matched on date/symbol/side/qty/price) so a
-    trade isn't double-counted once IBKR's Flex batch catches up."""
+    """Splice live TWS fills (this session's + every prior day's, from the trades
+    ledger) into the Flex trade rows in place. A fill is skipped only when the
+    Flex batch already contains an equivalent trade (matched on
+    date/symbol/side/qty/price), so nothing is double-counted once Flex catches
+    up — but two genuinely-identical fills on the same day are both kept, because
+    each carries a distinct IBKR execId."""
     if not executions:
         return flex_rows
 
@@ -966,14 +1012,16 @@ def merge_todays_executions(flex_rows, executions):
                 round(_flt(r.get("quantity")),   4),
                 round(_flt(r.get("tradePrice")), 6))
 
-    existing = {_key(r) for r in flex_rows}
+    # Dedup against the Flex rows ONLY (frozen up front): execution rows are
+    # already unique by execId, so we must not suppress a second identical fill.
+    flex_keys = {_key(r) for r in flex_rows}
     added = 0
     for r in _executions_to_flex_rows(executions):
-        if _key(r) not in existing:
+        if _key(r) not in flex_keys:
             flex_rows.append(r)
-            existing.add(_key(r))
             added += 1
-    print(f"  [Today's fills] merged {added} live execution(s) not yet in the Flex batch.")
+    print(f"  [Live fills] merged {added} TWS execution(s) not present in the Flex batch "
+          f"(from {len(executions)} ledgered fill(s)).")
     return flex_rows
 
 
@@ -2279,13 +2327,22 @@ def main():
     print(f"  [Order Ledger] {len(ledger)} order(s) tracked for trigger/limit history "
           f"({LEDGER_FILE}).")
 
+    # Persist EVERY live TWS fill across runs so no day's orders are ever lost —
+    # today's fills are saved now and every prior day's remain available even
+    # when reqExecutions (current-day only) or the Flex batch no longer has them.
+    trades_ledger = load_trades_ledger()
+    update_trades_ledger(trades_ledger, executions)
+    save_trades_ledger(trades_ledger)
+    print(f"  [Trades Ledger] {len(trades_ledger)} lifetime fill(s) retained "
+          f"({TRADES_LEDGER_FILE}).")
+
     ref        = send_request()
     xml_text   = get_statement(ref)
     rows       = parse_trades(xml_text)
-    # Splice in today's live fills from TWS: IBKR's Flex batch lags ~a day, so
-    # without this today's buy/sell trades are missing from All Trades / Trade
-    # Summary / Open Positions until tomorrow's run.
-    merge_todays_executions(rows, executions)
+    # Splice in live TWS fills — this session's plus every prior day's from the
+    # trades ledger. IBKR's Flex batch lags ~a day and reqExecutions only returns
+    # the current day, so this is what guarantees every day's orders are present.
+    merge_todays_executions(rows, trades_ledger)
     # Express every trade in the base currency (USD) so the report never mixes
     # currencies, even when the account holds FX pairs or non-USD instruments.
     normalize_trades_to_usd(rows)
