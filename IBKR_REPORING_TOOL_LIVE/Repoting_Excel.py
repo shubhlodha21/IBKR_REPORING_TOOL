@@ -24,7 +24,7 @@ import time
 import threading
 import datetime as dt
 import xml.etree.ElementTree as ET
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import requests
 from openpyxl import Workbook
@@ -311,12 +311,17 @@ class IBOrderApp(EWrapper, EClient):
             "exchange":    execution.exchange,
             "time":        execution.time,
             "commission":  None,            # filled in by commissionReport
+            "commission_currency": None,    # filled in by commissionReport
         }
 
     def commissionReport(self, commissionReport):
         ex = self.executions.get(commissionReport.execId)
         if ex is not None:
             ex["commission"] = commissionReport.commission
+            # IBKR bills forex commissions in USD even when the trade currency is
+            # JPY/etc.; capturing the currency lets us avoid wrongly FX-converting
+            # an already-USD commission.
+            ex["commission_currency"] = getattr(commissionReport, "currency", None)
 
     def execDetailsEnd(self, reqId):
         print(f"[TWS] execDetailsEnd - {len(self.executions)} execution(s) received so far.")
@@ -556,9 +561,10 @@ PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
 PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
 
 TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
-                 "Action", "Quantity", "Price", "Trigger Price", "Limit Price",
-                 "Exchange", "Order Type", "Commission", "Realized PnL", "Account"]
-TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 14, 14, 12, 12, 14, 14, 14]
+                 "Action", "Quantity", "Price",
+                 "Order Type", "Trigger Price", "Offset", "Limit Price", "SL %",
+                 "Exchange", "Commission", "Realized PnL", "Account"]
+TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 12, 14, 12, 14, 10, 12, 14, 14, 14]
 
 # Gulf Standard Time (Dubai) is UTC+4 — used for the second All Trades time column.
 _GST_OFFSET_HOURS = 4
@@ -674,6 +680,26 @@ def build_individual_trade_rows(trade_rows, date_filter=None, order_lookup=None,
             if m_lim not in (None, ""):
                 limit_cell = m_lim
 
+        # Offset = |limit - trigger|, mirroring the Pending Order sheet, computed
+        # from whatever trigger/limit the row ended up with (ledger/Flex/manual).
+        def _num(v):
+            try:
+                return float(str(v).replace(",", "")) if v not in (None, "") else None
+            except (ValueError, TypeError):
+                return None
+        t_num, l_num = _num(trigger_cell), _num(limit_cell)
+        offset_cell = f"{abs(l_num - t_num):.4f}" if (t_num is not None and l_num is not None) else ""
+        # SL % is an entry-vs-stop relationship that only exists for a live order
+        # pair, not a single executed fill, so it stays blank here (column present
+        # to mirror the Pending Order layout).
+        sl_pct_cell = ""
+
+        # Realized PnL: FIFO-derived USD value (see attach_fifo_realized), which
+        # is populated on squared-off fills and sums to the Trade Summary PnL.
+        # Fall back to IBKR's fifoPnlRealized if the FIFO pass didn't run.
+        realized = (r["_realized_usd"] if "_realized_usd" in r
+                    else r.get("fifoPnlRealized"))
+
         rows.append([
             dt_str,             # Date & Time (UTC)
             _to_gst(dt_str),    # Date & Time (GST) — Dubai, UTC+4
@@ -683,13 +709,15 @@ def build_individual_trade_rows(trade_rows, date_filter=None, order_lookup=None,
             action,
             qty_str,
             price_str,
-            trigger_cell,
-            limit_cell,
-            r.get("exchange", ""),
-            r.get("orderType", ""),
-            _amt(commission),
-            _amt(r.get("fifoPnlRealized"), signed=True),
-            account,
+            r.get("orderType", ""),   # Order Type
+            trigger_cell,             # Trigger Price
+            offset_cell,              # Offset
+            limit_cell,               # Limit Price
+            sl_pct_cell,              # SL %
+            r.get("exchange", ""),    # Exchange
+            _amt(commission),         # Commission
+            _amt(realized, signed=True),   # Realized PnL
+            account,                  # Account
         ])
     return rows
 
@@ -946,10 +974,12 @@ def build_trade_rows(executions):
             ex["action"],
             ex["quantity"],
             f"{ex['price']:.4f}"      if ex["price"]      is not None else "",
-            "",                                              # Trigger Price (n/a)
-            "",                                              # Limit Price (n/a)
-            ex["exchange"],
             "",                                              # Order Type (n/a)
+            "",                                              # Trigger Price (n/a)
+            "",                                              # Offset (n/a)
+            "",                                              # Limit Price (n/a)
+            "",                                              # SL % (n/a)
+            ex["exchange"],
             round(abs(ex["commission"]), 2) if ex["commission"] is not None else "",
             "",                                              # Realized PnL (n/a)
             ex["account"],
@@ -991,7 +1021,7 @@ def _executions_to_flex_rows(executions, fx_rates=None):
     otherwise one leg stays in JPY and the summed PnL is nonsense."""
     fx_rates = fx_rates or {}
     out = []
-    for ex in executions.values():
+    for exec_id, ex in executions.items():
         qty   = _flt(ex.get("quantity"))
         price = _flt(ex.get("price"))
         sectype = (ex.get("secType") or "").upper()
@@ -1010,11 +1040,18 @@ def _executions_to_flex_rows(executions, fx_rates=None):
             "description":     ex.get("localSymbol") or "",
             "assetCategory":   sectype,       # STK/CASH/OPT/... — drives CASH handling
             "conid":           ex.get("conId"),
+            # execId lets merge dedup exactly against the Flex ibExecID once the
+            # Flex batch catches up, independent of the fuzzy field match.
+            "ibExecID":        exec_id,
             "buySell":         (ex.get("action") or "").upper(),
             "quantity":        qty,
             "tradePrice":      price,
             "tradeMoney":      qty * price,
             "ibCommission":    ex.get("commission"),
+            # Forex commissions are billed in USD; default to USD for CASH so we
+            # don't FX-convert an already-USD commission (see normalize).
+            "ibCommissionCurrency": (ex.get("commission_currency")
+                                     or (BASE_CURRENCY if sectype == "CASH" else ccy)),
             "fifoPnlRealized": 0.0,           # not carried by the execution feed
             "exchange":        ex.get("exchange") or "",
             "dateTime":        str(ex.get("time") or ""),
@@ -1040,20 +1077,31 @@ def merge_todays_executions(flex_rows, executions, fx_rates=None):
         return flex_rows
 
     def _key(r):
+        # abs() on qty/price is essential: IBKR Flex reports SELL quantities as
+        # NEGATIVE (-50000) while the execution feed stores them positive, so
+        # without abs the same sell never matches and gets duplicated. The side
+        # (B/S) already encodes direction, so abs loses nothing.
         return (parse_trade_date(r),
                 (r.get("symbol") or "").upper(),
                 (r.get("buySell") or "").upper()[:1],       # B(UY)/B(OT), S(ELL)/S(LD)
-                round(_flt(r.get("quantity")),   4),
-                round(_flt(r.get("tradePrice")), 6))
+                round(abs(_flt(r.get("quantity"))),   2),
+                round(abs(_flt(r.get("tradePrice"))), 4))
+
+    def _exec_id(r):
+        return str(r.get("ibExecID") or r.get("execID") or r.get("ibExecId") or "").strip()
 
     # Dedup against the Flex rows ONLY (frozen up front): execution rows are
     # already unique by execId, so we must not suppress a second identical fill.
-    flex_keys = {_key(r) for r in flex_rows}
+    flex_keys     = {_key(r) for r in flex_rows}
+    flex_exec_ids = {e for e in (_exec_id(r) for r in flex_rows) if e}
     added = 0
     for r in _executions_to_flex_rows(executions, fx_rates):
-        if _key(r) not in flex_keys:
-            flex_rows.append(r)
-            added += 1
+        # Skip if the Flex batch already has this fill — by exact execId (when the
+        # Flex query exposes ibExecID) or by the fuzzy field key otherwise.
+        if _exec_id(r) in flex_exec_ids or _key(r) in flex_keys:
+            continue
+        flex_rows.append(r)
+        added += 1
     print(f"  [Live fills] merged {added} TWS execution(s) not present in the Flex batch "
           f"(from {len(executions)} ledgered fill(s)).")
     return flex_rows
@@ -1118,11 +1166,14 @@ BASE_CURRENCY = "USD"
 
 # Monetary trade fields denominated in the trade's own currency. These are the
 # amounts that must be scaled by fxRateToBase so the whole report reads in USD.
+# Commission is handled separately (see normalize_trades_to_usd) because IBKR
+# bills it in ibCommissionCurrency, which for forex is USD — NOT the trade
+# currency — so it must not be scaled by the trade's fxRateToBase.
 _MONEY_FIELDS = (
-    "tradeMoney", "proceeds", "netCash", "cost", "closePrice",
-    "ibCommission", "commission", "taxes",
+    "tradeMoney", "proceeds", "netCash", "cost", "closePrice", "taxes",
     "fifoPnlRealized", "fifoPnlUnrealized", "mtmPnl", "unrealizedPnl",
 )
+_COMMISSION_FIELDS = ("ibCommission", "commission")
 
 
 def _fx_rate_to_base(row):
@@ -1140,18 +1191,45 @@ def _fx_rate_to_base(row):
     return rate if rate > 0 else 1.0
 
 
-def normalize_trades_to_usd(trade_rows):
+def normalize_trades_to_usd(trade_rows, fx_rates=None):
     """Convert every trade's monetary fields into the base currency (USD) in place.
 
     IBKR Flex reports FX pairs (e.g. USD.JPY) and non-USD instruments with their
-    money/PnL/commission fields in the instrument's own currency. Scaling each of
-    those by fxRateToBase yields a single-currency (USD) report. Per-unit prices
+    money/PnL fields in the instrument's own currency. Scaling each by
+    fxRateToBase yields a single-currency (USD) report. Per-unit prices
     (tradePrice) are converted for non-FX instruments so a non-USD stock shows a
     USD price; for FX (assetCategory CASH) the 'price' is an exchange rate, not a
-    money amount, so it is left as quoted."""
+    money amount, so it is left as quoted.
+
+    Commission is converted by ITS OWN currency (ibCommissionCurrency), not the
+    trade's: IBKR bills forex commission in USD even for a JPY-quoted pair, so
+    scaling it by the JPY rate would wrongly shrink a real ~$2 fee to ~$0.01.
+    fx_rates (see build_fx_rate_map) supplies the rate when the commission
+    currency differs from the trade currency."""
+    fx_rates = fx_rates or {}
     for r in trade_rows:
-        rate = _fx_rate_to_base(r)
+        rate      = _fx_rate_to_base(r)
+        trade_ccy = (r.get("currency") or BASE_CURRENCY).upper()
+
+        # ── commission: convert by the commission's own currency ──────────────
+        comm_ccy = (r.get("ibCommissionCurrency")
+                    or (BASE_CURRENCY if (r.get("assetCategory") or "").upper() == "CASH"
+                        else trade_ccy)).upper()
+        if comm_ccy != BASE_CURRENCY:
+            comm_rate = rate if comm_ccy == trade_ccy else fx_rates.get(comm_ccy)
+            if comm_rate and comm_rate > 0:
+                for field in _COMMISSION_FIELDS:
+                    raw = r.get(field)
+                    if raw in (None, ""):
+                        continue
+                    try:
+                        r[field] = float(raw) * comm_rate
+                    except (ValueError, TypeError):
+                        continue
+        r["ibCommissionCurrency"] = BASE_CURRENCY
+
         if rate == 1.0:
+            r["currency"] = BASE_CURRENCY
             continue
         for field in _MONEY_FIELDS:
             raw = r.get(field)
@@ -1173,6 +1251,52 @@ def normalize_trades_to_usd(trade_rows):
         # Now expressed in base currency — reflect that so nothing downstream
         # mistakes the row for its original currency.
         r["currency"] = BASE_CURRENCY
+    return trade_rows
+
+
+def attach_fifo_realized(trade_rows):
+    """Store per-fill realized PnL (USD) on each row as '_realized_usd', derived
+    by FIFO-matching each symbol's fills chronologically.
+
+    IBKR's own fifoPnlRealized is 0 / unreliable for FX, and the Trade Summary
+    derives PnL as (sell_value - buy_value) in USD, so we mirror that here at the
+    fill level: a closing fill carries the realized PnL of the lots it closes, and
+    for a squared-off symbol the fills sum exactly to the Trade Summary PnL. Must
+    run AFTER normalize_trades_to_usd so tradeMoney is already in USD."""
+    by_symbol = defaultdict(list)
+    for r in trade_rows:
+        sym = r.get("symbol") or r.get("description") or "UNKNOWN"
+        by_symbol[sym].append(r)
+
+    for _sym, rs in by_symbol.items():
+        chron = sorted(rs, key=lambda r: (parse_trade_date(r) or dt.date.min,
+                                          r.get("dateTime") or r.get("tradeDate") or ""))
+        lots = deque()                          # each: [signed_qty, usd_unit_price]
+        for r in chron:
+            qty = abs(_flt(r.get("quantity")))
+            if qty <= 1e-9:
+                r["_realized_usd"] = 0.0
+                continue
+            is_buy = (r.get("buySell") or "").upper() in ("BUY", "BOT", "B")
+            sign   = 1 if is_buy else -1
+            money  = abs(_flt(r.get("tradeMoney"))) or (qty * abs(_flt(r.get("tradePrice"))))
+            unit   = money / qty
+            remaining, realized = qty, 0.0
+            # Close opposite-sign lots FIFO; realized = matched * (sell - buy)/unit.
+            while remaining > 1e-9 and lots and (lots[0][0] > 0) != is_buy:
+                lot     = lots[0]
+                lot_qty = abs(lot[0])
+                matched = min(remaining, lot_qty)
+                realized += (matched * (unit - lot[1]) if lot[0] > 0
+                             else matched * (lot[1] - unit))
+                if lot_qty - matched <= 1e-9:
+                    lots.popleft()
+                else:
+                    lot[0] = (lot_qty - matched) * (1 if lot[0] > 0 else -1)
+                remaining -= matched
+            if remaining > 1e-9:                 # leftover opens a new lot
+                lots.append([sign * remaining, unit])
+            r["_realized_usd"] = round(realized, 2)
     return trade_rows
 
 
@@ -2383,7 +2507,10 @@ def main():
     merge_todays_executions(rows, trades_ledger, fx_rates)
     # Express every trade in the base currency (USD) so the report never mixes
     # currencies, even when the account holds FX pairs or non-USD instruments.
-    normalize_trades_to_usd(rows)
+    normalize_trades_to_usd(rows, fx_rates)
+    # Derive per-fill realized PnL (USD) by FIFO so All Trades shows a real figure
+    # on each squared-off fill that sums to the Trade Summary PnL.
+    attach_fifo_realized(rows)
     # Authoritative open positions from the Flex statement — used for the Open
     # Position sheet when the live TWS feed is unavailable or returns nothing.
     open_positions = parse_open_positions(xml_text)
