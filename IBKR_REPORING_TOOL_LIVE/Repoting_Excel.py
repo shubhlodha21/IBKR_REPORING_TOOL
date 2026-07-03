@@ -115,7 +115,7 @@ def _ibkr_has(v):
 # No date cutoff — the report includes every trade IBKR returns.
 
 # Risk limits shown on the Dashboard (hardcoded).
-MAX_EXPOSURE   = 100000
+MAX_EXPOSURE   = 150000
 DAILY_MAX_LOSS = 2000
 
 # Cumulative loss attributed to bugs — a manually-maintained figure shown on the
@@ -1208,8 +1208,17 @@ def normalize_trades_to_usd(trade_rows, fx_rates=None):
     currency differs from the trade currency."""
     fx_rates = fx_rates or {}
     for r in trade_rows:
-        rate      = _fx_rate_to_base(r)
         trade_ccy = (r.get("currency") or BASE_CURRENCY).upper()
+        # Everything is reported in USD. Use ONE USD rate per currency (the most
+        # recent, from fx_rates) for ALL of that currency's trades — not each
+        # leg's own historical rate. Otherwise an FX pair whose buy and sell
+        # settled at different rates (USD.JPY: 0.0061507 vs 0.0062066) picks up a
+        # translation gain that flips a real loss into a green (profit) figure.
+        # With one rate, PnL correctly follows the buy-vs-sell price.
+        if trade_ccy == BASE_CURRENCY:
+            rate = 1.0
+        else:
+            rate = fx_rates.get(trade_ccy) or _fx_rate_to_base(r)
 
         # ── commission: convert by the commission's own currency ──────────────
         comm_ccy = (r.get("ibCommissionCurrency")
