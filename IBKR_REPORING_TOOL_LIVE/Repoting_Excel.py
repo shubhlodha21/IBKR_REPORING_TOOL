@@ -544,10 +544,11 @@ def build_pending_rows(orders_by_symbol):
             entry["quantity"],
             _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
         ])
-        # Stop/SELL row — no Total Amount
+        # Stop/SELL row — no Total Amount. Repeat the Contract (ticker) so the
+        # symbol is visible on the SELL leg too; Sr No stays blank.
         if stop:
             rows.append([
-                "", "", "", stop["action"], stop["orderType"],
+                "", symbol, "", stop["action"], stop["orderType"],
                 _fmt_price(stop["trigger"]), _fmt_price(stop["limit"]),
                 _offset(stop["trigger"], stop["limit"]),
                 "", stop["quantity"],
@@ -559,6 +560,67 @@ def build_pending_rows(orders_by_symbol):
 PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
                    "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount"]
 PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
+
+# Trades Status sheet — Pending Order layout plus a Status column, combining
+# live pending orders, today's cancelled orders, and every filled trade.
+TRADES_STATUS_HEADERS = PENDING_HEADERS + ["Status"]
+TRADES_STATUS_WIDTHS  = PENDING_WIDTHS + [18]
+STATUS_PENDING   = "Order is pending"
+STATUS_CANCELLED = "Cancelled"
+STATUS_FILLED    = "Filled"
+
+
+def _num_cell(v):
+    """Parse a formatted numeric cell ('1,234.50') back to float, or None."""
+    try:
+        return float(str(v).replace(",", "")) if v not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows):
+    """Rows for the Trades_Status sheet (Pending Order layout + Status), from:
+         • live pending orders                       → 'Order is pending'
+         • today's cancelled orders (TWS completed)  → 'Cancelled'
+         • every filled trade in All Trades          → 'Filled'
+    Sr No continues sequentially across the three sections."""
+    rows = []
+    sr   = 0
+
+    # 1) Pending orders — reuse the exact Pending Order rows, tagged pending.
+    for r in pending_rows:
+        rows.append(list(r) + [STATUS_PENDING])
+        if r[0] != "":
+            sr = r[0]
+
+    # 2) Today's cancelled orders (Filled ones come from All Trades instead).
+    for o in (completed_orders or []):
+        if "cancel" not in (o.get("status") or "").lower():
+            continue
+        sr += 1
+        rows.append([
+            sr, o["symbol"], "", o["action"], o["orderType"],
+            _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
+            _offset(o.get("trigger"), o.get("limit")),
+            "", o.get("quantity", ""),
+            _total_amount(o.get("quantity") or 0, o.get("trigger"), o.get("limit")),
+            STATUS_CANCELLED,
+        ])
+
+    # 3) Filled trades — map each All Trades row into the Pending Order layout.
+    #    All Trades columns: 3=Contract 4=Name 5=Action 6=Qty 7=Price
+    #    8=Type 9=Trigger 10=Offset 11=Limit 12=SL%.
+    for t in all_trade_rows:
+        sr += 1
+        qty, price = _num_cell(t[6]), _num_cell(t[7])
+        total = f"{qty * price:,.2f}" if (qty is not None and price is not None) else ""
+        rows.append([
+            sr, t[3], t[4], t[5], t[8],
+            t[9], t[11], t[10], t[12],
+            t[6], total,
+            STATUS_FILLED,
+        ])
+    return rows
 
 TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
                  "Action", "Quantity", "Price",
@@ -1608,6 +1670,7 @@ def _color_pnl_cell(cell):
 _SHEET_TITLES = {
     "Dashboard":       "ACCOUNT DASHBOARD",
     "Pending Order":   "PENDING ORDERS",
+    "Trades_Status":   "TRADES STATUS",
     "All Trades":      "ALL TRADES",
     "Open Position":   "OPEN POSITIONS",
     "Trade Summary":    "TRADE SUMMARY",
@@ -1780,7 +1843,8 @@ def _load_reference_sheet_pairs():
 
 
 def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
-                order_lookup=None, live_positions=None, flex_positions=None):
+                order_lookup=None, live_positions=None, flex_positions=None,
+                completed_orders=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
@@ -1838,6 +1902,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
         ("All Trades old AC",    "ref"),
         ("Dashboard",            "live"),
         ("Pending Order",        "live"),
+        ("Trades_Status",        "live"),
         ("Open Position",        "live"),
         ("All Trades",           "live"),
         ("Trade Summary",        "live"),
@@ -1865,6 +1930,11 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
+    trades_status_rows = build_trades_status_rows(pending_rows, completed_orders,
+                                                  all_trade_rows)
+    _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
+    print(f"  [Trades Status] {len(trades_status_rows)} row(s) "
+          f"(pending + cancelled + filled).")
     _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions, flex_positions)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
@@ -2145,6 +2215,26 @@ def _fill_pending_sheet(ws, rows):
     _style_data_rows(ws, start_row=3, n_cols=n_cols)
 
     for col, width in enumerate(PENDING_WIDTHS, start=1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    _apply_autofilter(ws, n_cols)
+    ws.freeze_panes = "A3"
+
+
+# ── Trades Status sheet ────────────────────────────────────────────────
+def _fill_trades_status_sheet(ws, rows):
+    ws.title = "Trades_Status"
+    n_cols   = len(TRADES_STATUS_HEADERS)
+
+    _write_title_row(ws, _SHEET_TITLES["Trades_Status"], n_cols)
+    _write_header_row(ws, TRADES_STATUS_HEADERS, row=2)
+
+    for row in rows:
+        ws.append(row)
+
+    _style_data_rows(ws, start_row=3, n_cols=n_cols)
+
+    for col, width in enumerate(TRADES_STATUS_WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
     _apply_autofilter(ws, n_cols)
@@ -2530,7 +2620,7 @@ def main():
     if not rows:
         print("No trades found. Check the query's date range and section config.")
     write_excel(rows, pending_rows, trade_rows, account_id, account_data,
-                order_lookup, live_positions, open_positions)
+                order_lookup, live_positions, open_positions, completed_orders)
 
 
 if __name__ == "__main__":
