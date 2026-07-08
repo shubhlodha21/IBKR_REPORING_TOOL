@@ -263,6 +263,7 @@ class IBOrderApp(EWrapper, EClient):
             "limit":     limit,
             "quantity":  int(order.totalQuantity) if order.totalQuantity else 0,
             "status":    orderState.status,
+            "currency":  contract.currency,
         })
 
     def completedOrdersEnd(self):
@@ -281,6 +282,9 @@ class IBOrderApp(EWrapper, EClient):
             "limit":     limit,
             "quantity":  int(order.totalQuantity),
             "parentId":  order.parentId,
+            # Quote currency (JPY for USD.JPY, USD for a US stock) so the USD
+            # notional can be derived from the native trigger/limit price.
+            "currency":  contract.currency,
         })
 
     def openOrderEnd(self):
@@ -517,14 +521,27 @@ def _offset(trigger, limit_price):
     return ""
 
 
-def _total_amount(qty, trigger, limit_price):
+def _usd_rate(currency, fx_rates):
+    """fxRateToBase for `currency` (1.0 for USD or when no rate is known)."""
+    ccy = (currency or BASE_CURRENCY).upper()
+    return 1.0 if ccy == BASE_CURRENCY else (fx_rates or {}).get(ccy, 1.0)
+
+
+def _total_amount(qty, trigger, limit_price, currency=None, fx_rates=None):
+    """USD notional for an order/trade row. The price (trigger, else limit) is the
+    instrument's native quote — for an FX pair it's in the quote currency (JPY for
+    USD.JPY) — so multiply by that currency's fxRateToBase to express every Total
+    Amount in USD (a USD.JPY leg then reads ~50,000 USD, not millions of JPY)."""
     price = trigger if trigger is not None else limit_price
-    if price is not None:
-        return f"{qty * price:,.2f}"
-    return ""
+    if price is None or qty in (None, ""):
+        return ""
+    try:
+        return f"{float(qty) * float(price) * _usd_rate(currency, fx_rates):,.2f}"
+    except (ValueError, TypeError):
+        return ""
 
 
-def build_pending_rows(orders_by_symbol):
+def build_pending_rows(orders_by_symbol, fx_rates=None):
     rows = []
     sr = 0
     for symbol, legs in orders_by_symbol.items():
@@ -542,7 +559,8 @@ def build_pending_rows(orders_by_symbol):
             _offset(entry["trigger"], entry["limit"]),
             _sl_pct(entry["trigger"], stop["trigger"] if stop else None),
             entry["quantity"],
-            _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
+            _total_amount(entry["quantity"], entry["trigger"], entry["limit"],
+                          entry.get("currency"), fx_rates),
         ])
         # Stop/SELL row — no Total Amount. Repeat the Contract (ticker) so the
         # symbol is visible on the SELL leg too; Sr No stays blank.
@@ -565,7 +583,7 @@ PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
 # live pending orders, today's cancelled orders, and every filled trade.
 TRADES_STATUS_HEADERS = PENDING_HEADERS + ["Status"]
 TRADES_STATUS_WIDTHS  = PENDING_WIDTHS + [18]
-STATUS_PENDING   = "Order is pending"
+STATUS_PENDING   = "Pending"
 STATUS_CANCELLED = "Cancelled"
 STATUS_FILLED    = "Filled"
 
@@ -578,20 +596,24 @@ def _num_cell(v):
         return None
 
 
-def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows):
+def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows,
+                             fx_rates=None):
     """Rows for the Trades_Status sheet (Pending Order layout + Status), from:
-         • live pending orders                       → 'Order is pending'
+         • live pending orders                       → 'Pending'
          • today's cancelled orders (TWS completed)  → 'Cancelled'
          • every filled trade in All Trades          → 'Filled'
-    Sr No continues sequentially across the three sections."""
+    Sr No is a plain running count (1,2,3,…) on every row. Every Total Amount is
+    in USD (see _total_amount) so the sheet never mixes currencies."""
     rows = []
     sr   = 0
 
-    # 1) Pending orders — reuse the exact Pending Order rows, tagged pending.
+    # 1) Pending orders — reuse the exact Pending Order rows (already in USD),
+    #    but stamp a sequential Sr No onto every row, including SELL legs.
     for r in pending_rows:
-        rows.append(list(r) + [STATUS_PENDING])
-        if r[0] != "":
-            sr = r[0]
+        sr += 1
+        row = list(r)
+        row[0] = sr
+        rows.append(row + [STATUS_PENDING])
 
     # 2) Today's cancelled orders (Filled ones come from All Trades instead).
     for o in (completed_orders or []):
@@ -603,17 +625,23 @@ def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows):
             _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
             _offset(o.get("trigger"), o.get("limit")),
             "", o.get("quantity", ""),
-            _total_amount(o.get("quantity") or 0, o.get("trigger"), o.get("limit")),
+            _total_amount(o.get("quantity") or 0, o.get("trigger"), o.get("limit"),
+                          o.get("currency"), fx_rates),
             STATUS_CANCELLED,
         ])
 
     # 3) Filled trades — map each All Trades row into the Pending Order layout.
     #    All Trades columns: 3=Contract 4=Name 5=Action 6=Qty 7=Price
     #    8=Type 9=Trigger 10=Offset 11=Limit 12=SL%.
+    #    The All Trades Price is the native quote for FX (JPY for USD.JPY) but
+    #    already USD for stocks; derive the quote currency from the pair symbol
+    #    ("USD.JPY" → JPY) so the USD notional is correct for both.
     for t in all_trade_rows:
         sr += 1
-        qty, price = _num_cell(t[6]), _num_cell(t[7])
-        total = f"{qty * price:,.2f}" if (qty is not None and price is not None) else ""
+        contract = str(t[3] or "")
+        quote_ccy = contract.split(".")[-1] if "." in contract else BASE_CURRENCY
+        total = _total_amount(_num_cell(t[6]), _num_cell(t[7]), None,
+                              quote_ccy, fx_rates)
         rows.append([
             sr, t[3], t[4], t[5], t[8],
             t[9], t[11], t[10], t[12],
@@ -1844,7 +1872,7 @@ def _load_reference_sheet_pairs():
 
 def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
                 order_lookup=None, live_positions=None, flex_positions=None,
-                completed_orders=None):
+                completed_orders=None, fx_rates=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
@@ -1931,7 +1959,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
     trades_status_rows = build_trades_status_rows(pending_rows, completed_orders,
-                                                  all_trade_rows)
+                                                  all_trade_rows, fx_rates)
     _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
     print(f"  [Trades Status] {len(trades_status_rows)} row(s) "
           f"(pending + cancelled + filled).")
@@ -2567,9 +2595,8 @@ def main():
     print("Connecting to TWS - fetching open/completed orders, executions, positions, and account summary...")
     (orders_by_symbol, account_data, executions,
      completed_orders, live_positions) = fetch_tws_data()
-    pending_rows = build_pending_rows(orders_by_symbol)
     trade_rows   = build_trade_rows(executions)
-    print(f"  {len(pending_rows)} pending order rows | "
+    print(f"  {len(orders_by_symbol)} pending symbol group(s) | "
           f"{len(trade_rows)} today's executions | "
           f"{len(completed_orders)} completed orders | "
           f"{0 if live_positions is None else len(live_positions)} live positions | "
@@ -2600,6 +2627,10 @@ def main():
     # normalization overwrites their currency, so live fills can be converted to
     # USD using the same rates.
     fx_rates = build_fx_rate_map(rows)
+    # Build pending-order rows now that FX rates are known, so their Total Amount
+    # (and the Trades_Status sheet's) reads in USD for FX pairs like USD.JPY.
+    pending_rows = build_pending_rows(orders_by_symbol, fx_rates)
+    print(f"  {len(pending_rows)} pending order rows.")
     # Splice in live TWS fills — this session's plus every prior day's from the
     # trades ledger. IBKR's Flex batch lags ~a day and reqExecutions only returns
     # the current day, so this is what guarantees every day's orders are present.
@@ -2620,7 +2651,8 @@ def main():
     if not rows:
         print("No trades found. Check the query's date range and section config.")
     write_excel(rows, pending_rows, trade_rows, account_id, account_data,
-                order_lookup, live_positions, open_positions, completed_orders)
+                order_lookup, live_positions, open_positions, completed_orders,
+                fx_rates)
 
 
 if __name__ == "__main__":
