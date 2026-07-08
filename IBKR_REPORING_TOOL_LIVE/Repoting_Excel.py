@@ -648,6 +648,13 @@ def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows,
             t[6], total,
             STATUS_FILLED,
         ])
+
+    # Name falls back to the Contract (ticker) whenever it's blank — pending and
+    # cancelled orders carry no Flex 'description', so their Name column would
+    # otherwise be empty.
+    for row in rows:
+        if not row[2]:          # Name column
+            row[2] = row[1]     # Contract column
     return rows
 
 TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
