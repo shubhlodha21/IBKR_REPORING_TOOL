@@ -579,13 +579,14 @@ PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
                    "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount"]
 PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
 
-# Trades Status sheet — Pending Order layout plus a Status column, combining
-# live pending orders, today's cancelled orders, and every filled trade.
-TRADES_STATUS_HEADERS = PENDING_HEADERS + ["Status"]
-TRADES_STATUS_WIDTHS  = PENDING_WIDTHS + [18]
-STATUS_PENDING   = "Pending"
-STATUS_CANCELLED = "Cancelled"
-STATUS_FILLED    = "Filled"
+# Trades Status sheet — Pending Order layout plus an Order_Status column,
+# combining live pending orders, today's completed orders, and every filled trade.
+TRADES_STATUS_HEADERS = PENDING_HEADERS + ["Order_Status"]
+TRADES_STATUS_WIDTHS  = PENDING_WIDTHS + [20]
+STATUS_PENDING   = "pending"            # live open orders still working
+STATUS_CANCELLED = "cancelled"          # completed order the user cancelled
+STATUS_REJECTED  = "did not go through" # completed order that never executed (rejected/inactive)
+STATUS_FILLED    = "executed"           # filled trade (from All Trades)
 
 
 def _num_cell(v):
@@ -598,10 +599,11 @@ def _num_cell(v):
 
 def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows,
                              fx_rates=None):
-    """Rows for the Trades_Status sheet (Pending Order layout + Status), from:
-         • live pending orders                       → 'Pending'
-         • today's cancelled orders (TWS completed)  → 'Cancelled'
-         • every filled trade in All Trades          → 'Filled'
+    """Rows for the Trades_Status sheet (Pending Order layout + Order_Status), from:
+         • live pending orders                         → 'pending'
+         • today's cancelled completed orders          → 'cancelled'
+         • today's rejected/inactive completed orders  → 'did not go through'
+         • every filled trade in All Trades            → 'executed'
     Sr No is a plain running count (1,2,3,…) on every row. Every Total Amount is
     in USD (see _total_amount) so the sheet never mixes currencies."""
     rows = []
@@ -615,10 +617,14 @@ def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows,
         row[0] = sr
         rows.append(row + [STATUS_PENDING])
 
-    # 2) Today's cancelled orders (Filled ones come from All Trades instead).
+    # 2) Today's completed orders that did NOT fill: split into user-cancelled
+    #    ('cancelled') vs rejected/inactive ('did not go through'). Filled ones
+    #    are skipped here — they come from All Trades as 'executed' below.
     for o in (completed_orders or []):
-        if "cancel" not in (o.get("status") or "").lower():
+        st = (o.get("status") or "").lower()
+        if "fill" in st:
             continue
+        label = STATUS_CANCELLED if "cancel" in st else STATUS_REJECTED
         sr += 1
         rows.append([
             sr, o["symbol"], "", o["action"], o["orderType"],
@@ -627,7 +633,7 @@ def build_trades_status_rows(pending_rows, completed_orders, all_trade_rows,
             "", o.get("quantity", ""),
             _total_amount(o.get("quantity") or 0, o.get("trigger"), o.get("limit"),
                           o.get("currency"), fx_rates),
-            STATUS_CANCELLED,
+            label,
         ])
 
     # 3) Filled trades — map each All Trades row into the Pending Order layout.
