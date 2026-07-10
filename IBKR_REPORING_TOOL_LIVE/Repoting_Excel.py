@@ -1575,7 +1575,7 @@ def aggregate(trade_rows):
     data = defaultdict(lambda: {
         "buy_qty": 0.0, "sell_qty": 0.0,
         "buy_value": 0.0, "sell_value": 0.0,
-        "commission": 0.0, "pnl": 0.0, "unrealized": 0.0,
+        "commission": 0.0, "pnl": 0.0,
         "exchanges": set(),
         "dates": [],
         "name": "",
@@ -1591,7 +1591,6 @@ def aggregate(trade_rows):
         # IBKR Flex uses 'ibCommission'; the TWS API uses 'commission'.
         commission = _flt(r.get("ibCommission") or r.get("commission") or 0)
         pnl        = _flt(r.get("fifoPnlRealized", 0))
-        unrealized = _flt(r.get("mtmPnl", 0)) or _flt(r.get("unrealizedPnl", 0))
         exchange   = r.get("exchange", "")
 
         c = data[symbol]
@@ -1603,7 +1602,6 @@ def aggregate(trade_rows):
             c["sell_value"] += money
         c["commission"] += commission
         c["pnl"]        += pnl
-        c["unrealized"] += unrealized
         if exchange:
             c["exchanges"].add(exchange)
         if name and not c["name"]:
@@ -1622,9 +1620,14 @@ def aggregate(trade_rows):
         # arrive as 0 (realized) or as a mark-to-market figure with the wrong sign
         # (mtmPnl), so derive realized P&L from the traded values instead.
         realized   = c["sell_value"] - c["buy_value"]
-        # Unrealized only applies while a position is still open; once it's flat
-        # (net 0) there is nothing unrealized, so don't carry IBKR's MTM figure.
-        unrealized = round(c["unrealized"], 2) if abs(net_qty) > 1e-9 else 0.0
+        # The Flex trade history carries NO genuine unrealized figure — its
+        # mtmPnl is mark-to-market on the (mostly closed) fills, not the open
+        # position's unrealized PnL, and for FX it leaks a large phantom value
+        # onto a tiny fractional residual (e.g. a -0.75 leftover on a 43,750
+        # round-trip). Unrealized only exists for a live open position, so it is
+        # sourced solely from IBKR's live portfolio feed (see the Open Position
+        # sheet and _live_unrealized_total); here it is always 0.
+        unrealized = 0.0
         datetimes = sorted(c["dates"], key=lambda x: x[0])
         result.append({
             "Contract":             symbol,
@@ -1969,7 +1972,8 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
 
     # Live sheets, then the manual sheets.
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
-                          agg_7, agg_today, agg_all, len(all_trade_rows))
+                          agg_7, agg_today, agg_all, len(all_trade_rows),
+                          live_positions=live_positions)
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
     trades_status_rows = build_trades_status_rows(pending_rows, completed_orders,
                                                   all_trade_rows, fx_rates)
@@ -2122,8 +2126,25 @@ def _fill_index_sheet(ws, sheet_titles, account_id="N/A"):
 
 
 # ── Dashboard sheet ────────────────────────────────────────────────────
+def _live_unrealized_total(live_positions):
+    """Total unrealized PnL, sourced solely from IBKR's live portfolio feed —
+    the only authoritative source (the Flex trade history has none). Sums
+    unrealizedPNL over the actually-open live positions and returns 0.0 when
+    TWS reported the account flat, or when it was unavailable (live_positions
+    is None). Matches what the Open Position sheet shows per contract."""
+    total = 0.0
+    for p in (live_positions or []):
+        if abs(p.get("position") or 0) < 1e-9:      # flat → nothing unrealized
+            continue
+        upnl = p.get("unrealizedPNL")
+        if _ibkr_has(upnl):
+            total += float(upnl)
+    return round(total, 2)
+
+
 def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
-                          agg_7, agg_today, agg_all, num_all_trades):
+                          agg_7, agg_today, agg_all, num_all_trades,
+                          live_positions=None):
     ws.title  = "Dashboard"
     now_ist   = dt.datetime.now(_IST)
     n_cols    = 2   # Parameter | Value
@@ -2142,7 +2163,8 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
     at_sells  = sum(r["Total (sold)"]         for r in agg_all)
     at_comm   = sum(r["Commission"]           for r in agg_all)
     at_pnl    = sum(r["PnL"]                  for r in agg_all)
-    at_unreal = sum(r["Unrealized PnL"]       for r in agg_all)
+    # Unrealized PnL comes straight from IBKR's live feed, not the trade history.
+    at_unreal = _live_unrealized_total(live_positions)
 
     summary_all = [
         ("Total Trades (fills)", num_all_trades,            ""),
