@@ -250,13 +250,27 @@ class IBOrderApp(EWrapper, EClient):
         self.reqCompletedOrders(False)   # False = all, not just API-placed
 
     # ── completed orders (today's filled/cancelled, with limit/trigger) ──
+    @staticmethod
+    def _pair_symbol(contract):
+        """Display/keying symbol for a contract. IBKR reports an FX (CASH)
+        contract.symbol as the bare BASE currency (e.g. 'USD' for USD.JPY); its
+        localSymbol carries the full pair ('USD.JPY'), which is how the Flex
+        trade history and the rest of the report key it. Use the pair for FX so
+        pending/completed FX orders show 'USD.JPY', not just 'USD'."""
+        if getattr(contract, "secType", "") == "CASH":
+            if contract.localSymbol:
+                return contract.localSymbol
+            if contract.symbol and contract.currency:
+                return f"{contract.symbol}.{contract.currency}"
+        return contract.symbol
+
     def completedOrder(self, contract, order, orderState):
         trigger = order.auxPrice if order.auxPrice not in _UNSET else None
         limit   = order.lmtPrice if order.lmtPrice not in _UNSET else None
         oid     = getattr(order, "permId", None) or getattr(order, "orderId", None)
         self.completed_orders.append({
             "orderId":   f"C{oid}",
-            "symbol":    contract.symbol,
+            "symbol":    self._pair_symbol(contract),
             "action":    order.action,
             "orderType": order.orderType,
             "trigger":   trigger,
@@ -274,7 +288,7 @@ class IBOrderApp(EWrapper, EClient):
     def openOrder(self, orderId, contract, order, orderState):
         trigger = order.auxPrice if order.auxPrice not in _UNSET else None
         limit   = order.lmtPrice if order.lmtPrice not in _UNSET else None
-        self.orders_by_symbol[contract.symbol].append({
+        self.orders_by_symbol[self._pair_symbol(contract)].append({
             "orderId":   orderId,
             "action":    order.action,
             "orderType": order.orderType,
@@ -2305,6 +2319,20 @@ def _fill_trades_status_sheet(ws, rows):
 
 
 # ── Open Position sheet ───────────────────────────────────────────────
+def _is_flat_residual(net_qty, gross_traded=0.0):
+    """True when a net position is effectively flat and must NOT be shown as an
+    open position. Besides an exact zero, an FX round-trip can leave a negligible
+    fractional residual — e.g. -0.75 units left on a 43,750-unit EUR.USD
+    round-trip — that IBKR/Flex still report as a standing position. Such 'dust'
+    (a net below 0.01% of the volume traded in the contract) is treated as
+    closed. When there is no traded volume to compare against (position opened
+    outside the Flex window), only an exact zero counts as flat."""
+    q = abs(net_qty or 0)
+    if q < 1e-9:
+        return True
+    return gross_traded > 0 and q / gross_traded < 1e-4
+
+
 def _build_live_open_positions(live_positions, trade_rows):
     """Open Position rows in the standard HEADERS format, driven by the LIVE
     IBKR positions (reqPositions) so the sheet shows the broker's actual
@@ -2350,6 +2378,11 @@ def _build_live_open_positions(live_positions, trade_rows):
         if not base.get("Name"):
             base["Name"] = name or pair or symbol
         base["Net"] = round(qty, 4)         # live broker quantity wins
+        # A negligible fractional leftover from a round-trip (FX "dust") is not a
+        # real open position — drop it so a closed contract stops showing here.
+        gross = (base.get("Buys") or 0) + (base.get("Sells") or 0)
+        if _is_flat_residual(qty, gross):
+            continue
         if not base.get("Exchange List"):
             base["Exchange List"] = p.get("exchange", "")
 
@@ -2409,7 +2442,9 @@ def _fill_running_positions_sheet(ws, trade_rows, live_positions=None,
         src = f"Flex open positions ({why})"
     else:
         agg     = aggregate(trade_rows)
-        running = [r for r in agg if r["Net"] != 0]
+        running = [r for r in agg
+                   if not _is_flat_residual(r["Net"],
+                                            (r.get("Buys") or 0) + (r.get("Sells") or 0))]
         src = "trade-netted (no live or Flex positions)"
     print(f"  [Open Position] {len(running)} open position(s) from {src}.")
     _fill_sheet(ws, "Open Position", running)
