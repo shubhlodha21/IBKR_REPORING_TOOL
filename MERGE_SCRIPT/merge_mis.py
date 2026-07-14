@@ -3,7 +3,7 @@ Merge a live MIS report and any number of paper MIS reports into one workbook.
 
 For a given date the Reports folder contains one live file plus one paper file
 per paper account:
-    MIS_<date>.xlsx                -> live account report  (Index + 10 sheets)
+    MIS_<date>.xlsx                -> live account report  (Index + 11 sheets)
     MIS_paper_<date>_<name>.xlsx   -> paper account report (paper_Index + 5 sheets)
 
 The <name> token identifies the paper account (e.g. Shubham, Ajay). A bare
@@ -16,7 +16,7 @@ Merge rules
 -----------
 * The merged Index is the LIVE Index, with ONE set of combined paper description
   rows appended below it (paper_Dashboard, paper_Pending Order, ...), renumbered
-  to continue the live list (11, 12, ...).
+  to continue the live list (12, 13, ...).
 * Each paper account's "Report Details" and "Login Details (Paper Account)"
   boxes are stacked below the live boxes so every account's credentials are kept.
 * Sheet order: Index, then every live data sheet, then ONE combined paper sheet
@@ -32,7 +32,7 @@ Merge rules
                                  column), Sr No renumbered.
     - paper_Dashboard         -> numeric parameters summed across paper accounts;
                                  text fields kept from the first account.
-* A Daywize_Snapshot sheet (Index item 16) holds one row per trade date found
+* A Daywize_Snapshot sheet (Index item 17) holds one row per trade date found
   in the pooled paper_All Trades data, newest first: Open Trades Count is the
   running cumulative fill count up to and including that date, No. of Trades
   taken Today is the fill count on that date alone; Bugs Found/Fixed default to
@@ -71,7 +71,7 @@ SNAPSHOT_HEADERS = [
 # --- Index layout constants (1-based rows/cols, matching the source files) ---
 SI_COL = "B"             # column holding the serial number
 DESC_COL = "C"           # column holding the description
-LIVE_LAST_ITEM_ROW = 19  # row of the last live item (Pending_Task, #14)
+LIVE_LAST_ITEM_ROW = 20  # row of the last live item (Pending_Task, #15)
 LIVE_FIRST_ITEM_ROW = 6  # row of live item #1 (Dashboard)
 LIVE_LOGIN_LAST_ROW = 10 # row of the live "Password" cell (end of Login box)
 PAPER_FIRST_ITEM_ROW = 6 # row of paper item #1 in paper_Index
@@ -98,6 +98,10 @@ PAPER_SHEET_CONFIG = {
 # sheet are skipped). Empty: every paper sheet (incl. paper_Trade Summary) is
 # kept so the merged Index carries all 16 items, each with its detail sheet.
 EXCLUDED_PAPER_SHEETS = set()
+
+# Live sheets renamed in the merged output (tab + Index description). The live
+# tool emits "Trades_Status"; the merged report presents it as "Order_Status".
+SHEET_RENAMES = {"Trades_Status": "Order_Status"}
 
 
 def parse_dt(value):
@@ -199,7 +203,8 @@ def collect_index_titles(index_ws, paper_index_ws):
     Every title equals its sheet name, so each Index row can link straight to it.
     """
     live_titles = [
-        str(index_ws[f"{DESC_COL}{r}"].value)
+        SHEET_RENAMES.get(str(index_ws[f"{DESC_COL}{r}"].value),
+                          str(index_ws[f"{DESC_COL}{r}"].value))
         for r in range(LIVE_FIRST_ITEM_ROW, LIVE_LAST_ITEM_ROW + 1)
         if index_ws[f"{DESC_COL}{r}"].value is not None
     ]
@@ -259,11 +264,17 @@ def add_srno_and_filter(ws):
     """Ensure column A is a "Sr No" serial column and the sheet has an autofilter.
 
     Sheets use the title(row1)/header(row2)/data(row3+) layout with a single
-    banner merge on row 1. When column A is not already a Sr No column, a new one
-    is inserted: every header/data cell shifts one column right (values + styles),
-    the banner merge and column widths shift with them, and data rows are numbered
-    1..N. Sheets that already lead with Sr No keep their numbering; either way an
-    autofilter is applied over the header + data.
+    banner merge on row 1. When column A is not already a Sr No column, the sheet
+    is rebuilt one column to the right with a fresh Sr No in column A: every
+    header/data cell carries its value + style across, the banner merge and column
+    widths move with them, and data rows are numbered 1..N.
+
+    Any "Sr No" the source sheet already carries mid-sheet is dropped during that
+    rebuild — the reporting tool's All Trades puts one after the two date columns,
+    which column A's check doesn't see, so it used to survive the shift and leave
+    the merged sheet with TWO serial columns. Column A is now the single source of
+    numbering, consistent with every other sheet. Sheets that already lead with
+    Sr No keep their numbering; either way an autofilter covers header + data.
     """
     header_row = DATA_START_ROW - 1  # row 2
 
@@ -278,17 +289,37 @@ def add_srno_and_filter(ws):
     last_col = ws.max_column
     last_row = ws.max_row
 
-    # Drop the row-1 banner merge so it can be re-anchored after the shift.
+    # Source columns to carry over, in order, minus any existing Sr No column.
+    # Removing one and adding one back at column A keeps the width unchanged.
+    keep = [c for c in range(1, last_col + 1)
+            if not _is_srno_header(ws.cell(header_row, c).value)]
+    new_last_col = len(keep) + 1        # + the Sr No inserted at column A
+
+    # Snapshot values/styles/widths first — source and destination overlap.
+    cells = {}
+    widths = {}
+    for new_c, old_c in enumerate(keep, start=2):
+        for row in range(header_row, last_row + 1):
+            src = ws.cell(row, old_c)
+            cells[(row, new_c)] = (src.value, copy.copy(src._style))
+        letter = get_column_letter(old_c)
+        if letter in ws.column_dimensions:
+            dim = ws.column_dimensions[letter]
+            widths[new_c] = (dim.width, dim.hidden)
+
+    # Drop the row-1 banner merge so it can be re-anchored after the rebuild.
     for merged in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merged))
 
-    # Shift every header/data cell (rows 2+) one column to the right.
-    for col in range(last_col, 0, -1):
+    for (row, col), (value, style) in cells.items():
+        dst = ws.cell(row, col)
+        dst.value = value
+        dst._style = style
+
+    # Blank any columns left trailing when an existing Sr No was dropped.
+    for col in range(new_last_col + 1, last_col + 1):
         for row in range(header_row, last_row + 1):
-            src = ws.cell(row, col)
-            dst = ws.cell(row, col + 1)
-            dst.value = src.value
-            dst._style = copy.copy(src._style)
+            ws.cell(row, col).value = None
 
     # Clear the vacated column A (rows 2+), styled like its new neighbour but
     # with a General number format so serial ints don't inherit a date/number
@@ -303,31 +334,24 @@ def add_srno_and_filter(ws):
 
     srno = 0
     for row in range(DATA_START_ROW, last_row + 1):
-        if any(ws.cell(row, c).value not in (None, "") for c in range(2, last_col + 2)):
+        if any(ws.cell(row, c).value not in (None, "")
+               for c in range(2, new_last_col + 1)):
             srno += 1
             ws.cell(row, 1).value = srno
 
-    # Shift column widths / hidden flags one column right; narrow the Sr No column.
-    widths = {}
-    for c in range(1, last_col + 1):
-        letter = get_column_letter(c)
-        if letter in ws.column_dimensions:
-            dim = ws.column_dimensions[letter]
-            widths[c] = (dim.width, dim.hidden)
-    for c in range(last_col, 0, -1):
-        if c in widths:
-            width, hidden = widths[c]
-            tgt = ws.column_dimensions[get_column_letter(c + 1)]
-            tgt.width, tgt.hidden = width, hidden
+    # Re-seat column widths / hidden flags; narrow the Sr No column.
+    for c, (width, hidden) in widths.items():
+        tgt = ws.column_dimensions[get_column_letter(c)]
+        tgt.width, tgt.hidden = width, hidden
     ws.column_dimensions["A"].width = 6
     ws.column_dimensions["A"].hidden = False
 
     # Re-anchor the banner across the full width, including the new column.
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col + 1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=new_last_col)
 
-    last = _last_data_row(ws, last_col + 1)
+    last = _last_data_row(ws, new_last_col)
     if last >= DATA_START_ROW:
-        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(last_col + 1)}{last}"
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(new_last_col)}{last}"
 
 
 def copy_box(src_ws, dst_ws, src_range, dst_top_row):
@@ -630,6 +654,13 @@ def build_snapshot_sheet(dst_wb, ledger, template_ws):
 def merge_pair(live_path: Path, paper_paths, out_path: Path):
     live_wb = openpyxl.load_workbook(live_path)
     index_ws = live_wb["Index"]
+
+    # Rename selected live sheet tabs for the merged output (e.g. Trades_Status
+    # -> Order_Status). The Index text is remapped in collect_index_titles; here
+    # we rename the actual tab so its hyperlink/reorder-by-title stay in sync.
+    for old, new in SHEET_RENAMES.items():
+        if old in live_wb.sheetnames:
+            live_wb[old].title = new
 
     # Default ("paper_") account first, then any numbered/labelled extras.
     ordered_paths = sorted(paper_paths, key=lambda p: (paper_label(p) != "", paper_label(p)))
