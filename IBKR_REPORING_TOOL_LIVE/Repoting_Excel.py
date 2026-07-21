@@ -573,10 +573,39 @@ def _is_working_order(o):
     return (o.get("status") or "").strip().lower() not in _DEAD_ORDER_STATUSES
 
 
-def build_pending_rows(orders_by_symbol, fx_rates=None):
+def filled_position_keys(live_positions):
+    """Every symbol identifier a live open position may be keyed by, upper-cased,
+    so a still-working order for the same instrument can be recognised and hidden
+    from Pending / Trades_Status once the position is filled. For FX, reqPositions
+    reports the bare base ('USD') while orders key the pair ('USD.JPY'), so we
+    include the bare symbol, the localSymbol name, and the constructed base.quote
+    pair."""
+    keys = set()
+    for p in (live_positions or []):
+        if abs(p.get("position") or 0) < 1e-9:      # flat → not an open position
+            continue
+        sym  = p.get("symbol") or ""
+        name = p.get("name") or ""                  # localSymbol, e.g. "USD.JPY"
+        ccy  = p.get("currency") or ""
+        pair = f"{sym}.{ccy}" if p.get("secType") == "CASH" and ccy else ""
+        for k in (sym, name, pair):
+            if k:
+                keys.add(k.upper())
+    return keys
+
+
+def build_pending_rows(orders_by_symbol, fx_rates=None, filled_symbols=None):
+    """Pending Order rows. A symbol whose position is already filled (it has a
+    live open position, see filled_symbols) is skipped entirely — its remaining
+    working legs (e.g. protective stop/target) are not shown as pending; the fill
+    appears as 'executed' in Trades_Status via All Trades instead."""
+    filled = filled_symbols or set()
     rows = []
     sr = 0
     for symbol, legs in orders_by_symbol.items():
+        # Position already filled/open → don't show its working legs as pending.
+        if str(symbol).upper() in filled:
+            continue
         # Drop legs that already filled / were cancelled so a position that is
         # now executed doesn't linger here as "pending"; skip the symbol entirely
         # once none of its legs are still working.
@@ -1687,7 +1716,8 @@ def aggregate(trade_rows):
     data = defaultdict(lambda: {
         "buy_qty": 0.0, "sell_qty": 0.0,
         "buy_value": 0.0, "sell_value": 0.0,
-        "commission": 0.0, "pnl": 0.0,
+        "commission": 0.0,
+        "realized_fifo": 0.0, "has_fifo": False,
         "exchanges": set(),
         "dates": [],
         "name": "",
@@ -1702,10 +1732,18 @@ def aggregate(trade_rows):
         money      = abs(_flt(r.get("tradeMoney", 0))) or qty * price
         # IBKR Flex uses 'ibCommission'; the TWS API uses 'commission'.
         commission = _flt(r.get("ibCommission") or r.get("commission") or 0)
-        pnl        = _flt(r.get("fifoPnlRealized", 0))
         exchange   = r.get("exchange", "")
 
         c = data[symbol]
+        # Per-fill FIFO realized PnL (USD), computed over the full history in
+        # attach_fifo_realized. Summing it gives the realized PnL of only the
+        # CLOSED quantity — the correct figure for a partially-open position,
+        # unlike Total(sold)-Total(bought), which wrongly books the full cost of
+        # the still-open remainder as a loss.
+        realized_fill = r.get("_realized_usd")
+        if realized_fill is not None:
+            c["realized_fifo"] += _flt(realized_fill)
+            c["has_fifo"] = True
         if side in ("BUY", "B"):
             c["buy_qty"]   += qty
             c["buy_value"] += money
@@ -1713,7 +1751,6 @@ def aggregate(trade_rows):
             c["sell_qty"]   += qty
             c["sell_value"] += money
         c["commission"] += commission
-        c["pnl"]        += pnl
         if exchange:
             c["exchanges"].add(exchange)
         if name and not c["name"]:
@@ -1727,11 +1764,15 @@ def aggregate(trade_rows):
         avg_b     = c["buy_value"]  / c["buy_qty"]  if c["buy_qty"]  else 0.0
         avg_s     = c["sell_value"] / c["sell_qty"] if c["sell_qty"] else 0.0
         net_qty   = c["buy_qty"] - c["sell_qty"]
-        # Realized P&L mirrors IBKR's "Net Total" = Total (sold) - Total (bought).
-        # IBKR's fifoPnlRealized/mtmPnl fields are unreliable for FX trades — they
-        # arrive as 0 (realized) or as a mark-to-market figure with the wrong sign
-        # (mtmPnl), so derive realized P&L from the traded values instead.
-        realized   = c["sell_value"] - c["buy_value"]
+        # Realized P&L = sum of the per-fill FIFO realized PnL (USD), so it counts
+        # ONLY the closed quantity. For a partially-open position (e.g. USD.JPY:
+        # bought 100k, sold 50k) this is the true realized figure on the closed
+        # 50k, not Total(sold)-Total(bought), which would wrongly book the full
+        # cost of the still-open 50k as a ~50k loss. Fall back to sold-bought only
+        # when the FIFO pass didn't run (e.g. rows lack _realized_usd), which is
+        # exact for a fully closed contract anyway.
+        realized   = (c["realized_fifo"] if c["has_fifo"]
+                      else c["sell_value"] - c["buy_value"])
         # The Flex trade history carries NO genuine unrealized figure — its
         # mtmPnl is mark-to-market on the (mostly closed) fills, not the open
         # position's unrealized PnL, and for FX it leaks a large phantom value
@@ -2809,8 +2850,13 @@ def main():
     normalize_positions_to_usd(live_positions, fx_rates)
     # Build pending-order rows now that FX rates are known, so their Total Amount
     # (and the Trades_Status sheet's) reads in USD for FX pairs like USD.JPY.
-    pending_rows = build_pending_rows(orders_by_symbol, fx_rates)
-    print(f"  {len(pending_rows)} pending order rows.")
+    # Symbols with a live open position are treated as filled: their remaining
+    # working legs are hidden from Pending / Trades_Status (the fill shows as
+    # 'executed' via All Trades).
+    filled_symbols = filled_position_keys(live_positions)
+    pending_rows = build_pending_rows(orders_by_symbol, fx_rates, filled_symbols)
+    print(f"  {len(pending_rows)} pending order rows "
+          f"({len(filled_symbols)} filled symbol(s) hidden).")
     # Splice in live TWS fills — this session's plus every prior day's from the
     # trades ledger. IBKR's Flex batch lags ~a day and reqExecutions only returns
     # the current day, so this is what guarantees every day's orders are present.
