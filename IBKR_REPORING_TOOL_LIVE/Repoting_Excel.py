@@ -299,6 +299,12 @@ class IBOrderApp(EWrapper, EClient):
             # Quote currency (JPY for USD.JPY, USD for a US stock) so the USD
             # notional can be derived from the native trigger/limit price.
             "currency":  contract.currency,
+            # Order lifecycle status (Submitted / PreSubmitted / Filled /
+            # Cancelled / Inactive / …). reqAllOpenOrders can still momentarily
+            # return an order that has just filled or been cancelled; the status
+            # lets build_pending_rows drop it so a filled position is never shown
+            # as still pending.
+            "status":    getattr(orderState, "status", "") or "",
         })
 
     def openOrderEnd(self):
@@ -555,10 +561,28 @@ def _total_amount(qty, trigger, limit_price, currency=None, fx_rates=None):
         return ""
 
 
+# Order statuses that mean the order is no longer working, so it must NOT be
+# shown as pending even if reqAllOpenOrders still momentarily reports it (e.g. an
+# entry that has just filled). Any other status (Submitted / PreSubmitted /
+# PendingSubmit / ApiPending / …) is treated as still live.
+_DEAD_ORDER_STATUSES = {"filled", "cancelled", "apicancelled", "inactive"}
+
+
+def _is_working_order(o):
+    """True when an open-order leg is still live (not filled/cancelled/inactive)."""
+    return (o.get("status") or "").strip().lower() not in _DEAD_ORDER_STATUSES
+
+
 def build_pending_rows(orders_by_symbol, fx_rates=None):
     rows = []
     sr = 0
     for symbol, legs in orders_by_symbol.items():
+        # Drop legs that already filled / were cancelled so a position that is
+        # now executed doesn't linger here as "pending"; skip the symbol entirely
+        # once none of its legs are still working.
+        legs = [o for o in legs if _is_working_order(o)]
+        if not legs:
+            continue
         sr += 1
         parents  = [o for o in legs if not o["parentId"]]
         children = [o for o in legs if o["parentId"]]
@@ -1104,26 +1128,61 @@ def build_trade_rows(executions):
     return rows
 
 
-def build_fx_rate_map(flex_rows):
-    """currency -> fxRateToBase, harvested from the Flex trades (which carry the
-    rate) so live TWS fills — whose execution feed omits it — can still be
-    converted to USD. Keeps the rate from the most recent trade per currency,
-    since FX rates drift over time."""
+def build_fx_rate_map(flex_rows, open_positions=None):
+    """currency -> fxRateToBase, so any non-USD amount anywhere in the report can
+    be converted to USD (live TWS fills and pending orders omit the rate, and a
+    currency with no rate at all would silently leak native JPY/etc. figures).
+
+    Sourced, in priority order, keeping the most recent value per currency:
+      1. fxRateToBase on the Flex trades (they carry it directly);
+      2. fxRateToBase on the Flex <OpenPosition> records;
+      3. FALLBACK — the rate implied by a USD-based FX pair's own price. USD.JPY
+         quoted at 161.7 means '161.7 JPY per 1 USD', so 1 JPY = 1/161.7 USD.
+         Only used for a currency still missing after (1)/(2), so an account that
+         trades a pair but whose trades lack fxRateToBase still converts."""
     best = {}                                   # ccy -> (date, rate)
-    for r in flex_rows:
-        ccy = (r.get("currency") or "").upper()
+
+    def _consider(ccy, raw_rate, d):
+        ccy = (ccy or "").upper()
         if not ccy or ccy == BASE_CURRENCY:
-            continue
+            return
         try:
-            rate = float(r.get("fxRateToBase"))
+            rate = float(raw_rate)
         except (ValueError, TypeError):
-            continue
+            return
         if rate <= 0:
-            continue
-        d = parse_trade_date(r) or dt.date.min
+            return
         if ccy not in best or d >= best[ccy][0]:
             best[ccy] = (d, rate)
-    return {ccy: rate for ccy, (_d, rate) in best.items()}
+
+    for r in flex_rows:
+        _consider(r.get("currency"), r.get("fxRateToBase"),
+                  parse_trade_date(r) or dt.date.min)
+    for op in (open_positions or []):
+        _consider(op.get("currency"), op.get("fxRateToBase"), dt.date.min)
+
+    # Fallback: derive a still-missing quote currency's rate from a USD-based FX
+    # pair's own trade price (only when USD is the pair's base, so the price is
+    # 'quote units per 1 USD').
+    derived = {}                                # ccy -> (date, rate)
+    for r in flex_rows:
+        sym = (r.get("symbol") or "").upper()
+        base_ccy, _, quote_ccy = sym.partition(".")
+        if base_ccy != BASE_CURRENCY or not quote_ccy or quote_ccy == BASE_CURRENCY:
+            continue
+        if quote_ccy in best:
+            continue
+        price = _flt(r.get("tradePrice"))
+        if price <= 0:
+            continue
+        d = parse_trade_date(r) or dt.date.min
+        if quote_ccy not in derived or d >= derived[quote_ccy][0]:
+            derived[quote_ccy] = (d, 1.0 / price)
+
+    out = {ccy: rate for ccy, (_d, rate) in best.items()}
+    for ccy, (_d, rate) in derived.items():
+        out.setdefault(ccy, rate)
+    return out
 
 
 def _executions_to_flex_rows(executions, fx_rates=None):
@@ -1380,6 +1439,39 @@ def normalize_trades_to_usd(trade_rows, fx_rates=None):
     return trade_rows
 
 
+# Live-position money fields (from reqPositions / updatePortfolio) that must read
+# in USD on the Open Position sheet and the Dashboard's unrealized total.
+_POSITION_MONEY_FIELDS = ("marketValue", "unrealizedPNL", "realizedPNL")
+
+
+def normalize_positions_to_usd(live_positions, fx_rates=None):
+    """Convert each live position's money fields (market value, unrealized &
+    realized PnL) and its average cost into USD in place, so the Open Position
+    sheet and the Dashboard never show a non-USD (e.g. JPY) figure for an FX pair.
+
+    IBKR's live portfolio feed reports these in the position's own quote currency
+    for FX pairs (JPY for USD.JPY); scaling by that currency's fxRateToBase (see
+    build_fx_rate_map) expresses them in USD. USD positions — and any currency
+    with no known rate — pass through unchanged. averageCost for an FX pair is the
+    quote rate (JPY per USD), so converting it yields the ~1.0 USD-normalized avg
+    the rest of the report already uses (matching normalize_trades_to_usd)."""
+    if not live_positions:
+        return live_positions
+    fx_rates = fx_rates or {}
+    for p in live_positions:
+        ccy = (p.get("currency") or BASE_CURRENCY).upper()
+        if ccy == BASE_CURRENCY:
+            continue
+        rate = fx_rates.get(ccy)
+        if not rate or rate <= 0:
+            continue
+        for field in (*_POSITION_MONEY_FIELDS, "averageCost", "avgCost"):
+            v = p.get(field)
+            if _ibkr_has(v):
+                p[field] = float(v) * rate
+    return live_positions
+
+
 def attach_fifo_realized(trade_rows):
     """Store per-fill realized PnL (USD) on each row as '_realized_usd', derived
     by FIFO-matching each symbol's fills chronologically.
@@ -1438,13 +1530,19 @@ def parse_open_positions(xml_text):
     return [dict(op.attrib) for op in root.findall(".//OpenPosition")]
 
 
-def _flex_open_to_position(op):
+def _flex_open_to_position(op, fx_rates=None):
     """Map a Flex <OpenPosition> record onto the same position-dict shape the live
     reqPositions/updatePortfolio feed produces, so _build_live_open_positions can
     consume either source. Monetary fields are converted to the base currency
     (USD); per-unit prices are converted for non-FX instruments only (see
-    normalize_trades_to_usd for the same rule)."""
-    rate    = _fx_rate_to_base(op)
+    normalize_trades_to_usd for the same rule).
+
+    The conversion rate prefers the shared fx_rates map (build_fx_rate_map), so a
+    record missing its own fxRateToBase still converts instead of leaking a native
+    (JPY) figure; it falls back to the record's own rate."""
+    ccy     = (op.get("currency") or BASE_CURRENCY).upper()
+    rate    = ((fx_rates or {}).get(ccy) if ccy != BASE_CURRENCY else 1.0) \
+              or _fx_rate_to_base(op)
     is_cash = (op.get("assetCategory") or "").upper() == "CASH"
 
     def _money(key):
@@ -1994,7 +2092,8 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
     print(f"  [Trades Status] {len(trades_status_rows)} row(s) "
           f"(pending + cancelled + filled).")
-    _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions, flex_positions)
+    _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions, flex_positions,
+                                  fx_rates)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
     _fill_strategy_sheet(wb.create_sheet(), carried.get("Strategy Details"))
@@ -2421,7 +2520,7 @@ def _build_live_open_positions(live_positions, trade_rows):
 
 
 def _fill_running_positions_sheet(ws, trade_rows, live_positions=None,
-                                  flex_positions=None):
+                                  flex_positions=None, fx_rates=None):
     """Open Position sheet, sourced in priority order:
 
       1. Live IBKR positions (reqPositions) — real-time broker truth.
@@ -2429,8 +2528,11 @@ def _fill_running_positions_sheet(ws, trade_rows, live_positions=None,
          returns nothing (a slow/empty live feed no longer blanks the sheet).
       3. Netting the Flex trade history — last resort; only correct when the
          statement's date range covers each position's opening trades.
+
+    fx_rates converts the Flex-snapshot figures to USD (live positions are already
+    normalized upstream) so the sheet never mixes currencies.
     """
-    flex_open = [p for p in (_flex_open_to_position(op) for op in (flex_positions or []))
+    flex_open = [p for p in (_flex_open_to_position(op, fx_rates) for op in (flex_positions or []))
                  if abs(p.get("position") or 0) > 1e-9]
 
     if live_positions:                              # connected AND holding positions
@@ -2693,10 +2795,18 @@ def main():
     ref        = send_request()
     xml_text   = get_statement(ref)
     rows       = parse_trades(xml_text)
-    # Harvest FX rates from the Flex trades (which carry fxRateToBase) BEFORE
-    # normalization overwrites their currency, so live fills can be converted to
-    # USD using the same rates.
-    fx_rates = build_fx_rate_map(rows)
+    # Authoritative open positions from the Flex statement — parsed up front so
+    # their fxRateToBase feeds the FX-rate map below (and used later for the Open
+    # Position sheet when the live TWS feed is unavailable or returns nothing).
+    open_positions = parse_open_positions(xml_text)
+    # Harvest FX rates from the Flex trades and open positions (which carry
+    # fxRateToBase) BEFORE normalization overwrites their currency, so live fills,
+    # pending orders and positions can all be converted to USD using the same
+    # rates. Falls back to the rate implied by a USD-based pair's own price.
+    fx_rates = build_fx_rate_map(rows, open_positions)
+    # Every live position's money fields to USD, so the Open Position sheet and
+    # the Dashboard's unrealized total never show a non-USD (JPY) figure.
+    normalize_positions_to_usd(live_positions, fx_rates)
     # Build pending-order rows now that FX rates are known, so their Total Amount
     # (and the Trades_Status sheet's) reads in USD for FX pairs like USD.JPY.
     pending_rows = build_pending_rows(orders_by_symbol, fx_rates)
@@ -2711,9 +2821,6 @@ def main():
     # Derive per-fill realized PnL (USD) by FIFO so All Trades shows a real figure
     # on each squared-off fill that sums to the Trade Summary PnL.
     attach_fifo_realized(rows)
-    # Authoritative open positions from the Flex statement — used for the Open
-    # Position sheet when the live TWS feed is unavailable or returns nothing.
-    open_positions = parse_open_positions(xml_text)
     account_id = parse_account_id(xml_text)
     print(f"Account: {account_id} | Parsed {len(rows)} trade records "
           f"(monetary values normalized to {BASE_CURRENCY}) | "
