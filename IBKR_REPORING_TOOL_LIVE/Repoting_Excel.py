@@ -733,19 +733,22 @@ PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
                    "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount"]
 PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
 
-# Trades Status sheet — Pending Order layout plus an Order_Status column and the
-# two lifecycle timestamps, combining live pending orders, today's completed
-# orders, and every filled trade.
+# Trades Status sheet — the Pending Order columns, led by the two lifecycle
+# timestamps and closed by Order_Status, combining live pending orders, today's
+# completed orders, and every filled trade.
 #   Order Date & Time    — when the order was placed (first seen by this tool).
 #   Executed Date & Time — when it actually filled (blank while still pending).
-TRADES_STATUS_HEADERS = PENDING_HEADERS + ["Order_Status",
-                                           "Order Date & Time (GST)",
-                                           "Executed Date & Time (GST)"]
-TRADES_STATUS_WIDTHS  = PENDING_WIDTHS + [20, 22, 22]
+# The timestamps sit right after Sr No so each asset block reads chronologically
+# left-to-right before the price/quantity detail.
+TRADES_STATUS_HEADERS = (["Sr No", "Order Date & Time (GST)",
+                          "Executed Date & Time (GST)"]
+                         + PENDING_HEADERS[1:] + ["Order_Status"])
+TRADES_STATUS_WIDTHS  = [7, 22, 22] + PENDING_WIDTHS[1:] + [20]
 # Column indexes into a Trades_Status row (0-based), used by the grouping and
-# banding logic below.
-TS_COL_SR, TS_COL_CONTRACT = 0, 1
-TS_COL_STATUS, TS_COL_ORDERED, TS_COL_EXECUTED = 11, 12, 13
+# group-rule logic below.
+TS_COL_SR, TS_COL_ORDERED, TS_COL_EXECUTED = 0, 1, 2
+TS_COL_CONTRACT, TS_COL_NAME = 3, 4
+TS_COL_STATUS = len(TRADES_STATUS_HEADERS) - 1
 STATUS_PENDING   = "pending"            # live open orders still working
 STATUS_CANCELLED = "cancelled"          # completed order the user cancelled
 STATUS_REJECTED  = "did not go through" # completed order that never executed (rejected/inactive)
@@ -770,9 +773,8 @@ def _group_trades_status_rows(rows):
     still-pending legs by the time they were placed). Groups themselves are
     ordered by their earliest activity, so the sheet still reads oldest-first.
 
-    Sr No then numbers the GROUPS (one asset = one Sr No, printed on the block's
-    first row only), matching the Pending Order sheet's convention where a
-    continuation leg leaves Sr No blank.
+    Sr No is then a plain running count (1,2,3,4,…) over every row, so it stays
+    a usable line number once the blocks are in place.
     """
     groups = defaultdict(list)
     for r in rows:
@@ -798,10 +800,10 @@ def _group_trades_status_rows(rows):
     ordered_groups.sort(key=lambda g: (g[0], g[1]))
 
     out = []
-    for sr, (_, _, grp) in enumerate(ordered_groups, start=1):
-        for i, r in enumerate(grp):
-            r[TS_COL_SR] = sr if i == 0 else ""
-            out.append(r)
+    for _, _, grp in ordered_groups:
+        out.extend(grp)
+    for sr, r in enumerate(out, start=1):
+        r[TS_COL_SR] = sr
     return out
 
 
@@ -849,15 +851,16 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
             slp = (_sl_pct(entry["trigger"], stop["trigger"])
                    if (o is entry and stop is not None and stop is not entry) else "")
             rows.append([
-                "", symbol, "", o["action"], o["orderType"],
+                "",                       # Sr No — numbered after grouping
+                ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
+                "",                       # not executed yet
+                symbol, "", o["action"], o["orderType"],
                 _fmt_price(o["trigger"]), _fmt_price(o["limit"]),
                 _offset(o["trigger"], o["limit"]),
                 slp, o["quantity"],
                 _total_amount(o["quantity"], o["trigger"], o["limit"],
                               o.get("currency"), fx_rates),
                 STATUS_PENDING,
-                ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
-                "",                       # not executed yet
             ])
 
     # 2) Today's completed orders that did NOT fill: split into user-cancelled
@@ -869,17 +872,18 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
             continue
         label = STATUS_CANCELLED if "cancel" in st else STATUS_REJECTED
         rows.append([
-            "", o["symbol"], "", o["action"], o["orderType"],
+            "",
+            ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
+            # completedTime is when it stopped working — a cancellation/rejection
+            # time, not a fill, so it belongs in the lifecycle-end column.
+            _fmt_tws_time(o.get("completedTime")),
+            o["symbol"], "", o["action"], o["orderType"],
             _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
             _offset(o.get("trigger"), o.get("limit")),
             "", o.get("quantity", ""),
             _total_amount(o.get("quantity") or 0, o.get("trigger"), o.get("limit"),
                           o.get("currency"), fx_rates),
             label,
-            ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
-            # completedTime is when it stopped working — a cancellation/rejection
-            # time, not a fill, so it belongs in the lifecycle-end column.
-            _fmt_tws_time(o.get("completedTime")),
         ])
 
     # 3) Filled trades — map each All Trades row into the Pending Order layout.
@@ -895,22 +899,23 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
                               quote_ccy, fx_rates)
         executed_at = t[1] or ""          # GST fill time, as All Trades shows it
         rows.append([
-            "", t[3], t[4], t[5], t[8],
-            t[9], t[11], t[10], t[12],
-            t[6], total,
-            STATUS_FILLED,
+            "",
             lookup_order_time(time_lookup, contract, t[5], t[8],
                               _dt_sort_key(executed_at).date()
                               if executed_at else None),
             executed_at,
+            t[3], t[4], t[5], t[8],
+            t[9], t[11], t[10], t[12],
+            t[6], total,
+            STATUS_FILLED,
         ])
 
     # Name falls back to the Contract (ticker) whenever it's blank — pending and
     # cancelled orders carry no Flex 'description', so their Name column would
     # otherwise be empty.
     for row in rows:
-        if not row[2]:          # Name column
-            row[2] = row[1]     # Contract column
+        if not row[TS_COL_NAME]:
+            row[TS_COL_NAME] = row[TS_COL_CONTRACT]
     return _group_trades_status_rows(rows)
 
 TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
@@ -1350,6 +1355,78 @@ def load_previous_report():
     print(f"  [Carry-forward] {len(manual_prices)} trigger/limit price(s); "
           f"{counts} from {os.path.basename(prev_path)}.")
     return manual_prices, carried
+
+
+# ----------------------------------------------------------------------
+# Suppressed fills — individual trades excluded from every sheet of the report.
+# ----------------------------------------------------------------------
+# IBKR reports these as real fills, but they are not trades the desk placed:
+# an FX round trip can settle a hair short and leave a token residual behind,
+# which IBKR then books as its own one-unit fill. Listing it alongside the
+# 43,750-unit legs it came from is noise, so each entry below is dropped from
+# the trade history before any sheet is built.
+#
+# A fill is suppressed when EVERY key present in an entry matches it, so add
+# only as many fields as it takes to pin the trade down. Quantity is compared
+# on absolute value (IBKR signs SELL quantities negative in some feeds), symbol
+# and action case-insensitively.
+SUPPRESSED_TRADES = [
+    # 1-unit / $1.14 residual left behind by a 43,750-unit EUR.USD round trip;
+    # surfaced in earlier reports as 09-Jul-2026 02:56:09 GST.
+    {"symbol": "EUR.USD", "action": "SELL", "quantity": 1},
+]
+
+
+def _trade_action(r):
+    """BUY/SELL for a trade record, normalising IBKR's BOT/SLD/B/S variants."""
+    raw = str(r.get("buySell") or "").upper().strip()
+    if raw in ("BUY", "BOT", "B"):
+        return "BUY"
+    return "SELL" if raw in ("SELL", "SLD", "S") else raw
+
+
+def _matches_suppressed(r, spec):
+    """True when trade record `r` matches every field named in `spec`."""
+    if "symbol" in spec:
+        sym = str(r.get("symbol") or r.get("description") or "").upper()
+        if sym != str(spec["symbol"]).upper():
+            return False
+    if "action" in spec and _trade_action(r) != str(spec["action"]).upper():
+        return False
+    if "quantity" in spec:
+        try:
+            if abs(float(r.get("quantity"))) != abs(float(spec["quantity"])):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if "date" in spec and str(parse_trade_date(r)) != str(spec["date"]):
+        return False
+    return True
+
+
+def drop_suppressed_trades(trade_rows):
+    """Remove every fill matching SUPPRESSED_TRADES, in place.
+
+    Applied to the trade history before normalisation and FIFO, so the dropped
+    fills are absent from All Trades, Trades_Status, Trade Summary, the
+    Dashboard counts and the trade-netted position figures alike — i.e. from
+    every sheet derived from trades. The live IBKR position feed is untouched,
+    since that is the broker's own record of what is actually held."""
+    if not SUPPRESSED_TRADES:
+        return 0
+    keep, dropped = [], []
+    for r in trade_rows:
+        if any(_matches_suppressed(r, s) for s in SUPPRESSED_TRADES):
+            dropped.append(r)
+        else:
+            keep.append(r)
+    if dropped:
+        trade_rows[:] = keep
+        for r in dropped:
+            print(f"  [Suppressed] dropped {_trade_action(r)} "
+                  f"{r.get('quantity')} {r.get('symbol')} "
+                  f"@ {r.get('tradePrice')} on {parse_trade_date(r)}")
+    return len(dropped)
 
 
 def build_trade_rows(executions):
@@ -2361,7 +2438,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     trades_status_rows = build_trades_status_rows(orders_by_symbol, completed_orders,
                                                   all_trade_rows, fx_rates, ledger)
     _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
-    n_groups = sum(1 for r in trades_status_rows if r[TS_COL_SR] != "")
+    n_groups = len({r[TS_COL_CONTRACT] for r in trades_status_rows})
     print(f"  [Trades Status] {len(trades_status_rows)} row(s) "
           f"(pending + cancelled + filled) in {n_groups} asset group(s).")
     _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions, flex_positions,
@@ -2669,25 +2746,21 @@ def _fill_pending_sheet(ws, rows):
     ws.freeze_panes = "A3"
 
 
-# Alternate asset blocks get a faint grey wash and a rule above them, so the
-# BUY and SELL legs bound together by _group_trades_status_rows read as one unit.
-_GROUP_FILL      = PatternFill("solid", fgColor="F2F2F2")
-_GROUP_RULE      = Border(top=Side(style="thin", color="1F3864"))
+# A thin rule separates one asset block from the next, so the BUY and SELL legs
+# bound together by _group_trades_status_rows read as one unit. The blocks are
+# deliberately left unshaded — the rule alone marks the boundary.
+_GROUP_RULE = Border(top=Side(style="thin", color="1F3864"))
 
 
-def _band_contract_groups(ws, start_row, n_cols, col_contract=2):
-    """Shade every other asset block and rule the line between blocks."""
-    prev, shade = None, False
+def _rule_contract_groups(ws, start_row, n_cols, col_contract=2):
+    """Draw a rule above each row that starts a new asset block."""
+    prev = None
     for r in range(start_row, ws.max_row + 1):
         contract = ws.cell(row=r, column=col_contract).value
         if prev is not None and contract != prev:
-            shade = not shade
             for c in range(1, n_cols + 1):
                 ws.cell(row=r, column=c).border = _GROUP_RULE
         prev = contract
-        if shade:
-            for c in range(1, n_cols + 1):
-                ws.cell(row=r, column=c).fill = _GROUP_FILL
 
 
 # ── Trades Status sheet ────────────────────────────────────────────────
@@ -2702,7 +2775,7 @@ def _fill_trades_status_sheet(ws, rows):
         ws.append(row)
 
     _style_data_rows(ws, start_row=3, n_cols=n_cols)
-    _band_contract_groups(ws, start_row=3, n_cols=n_cols,
+    _rule_contract_groups(ws, start_row=3, n_cols=n_cols,
                           col_contract=TS_COL_CONTRACT + 1)
 
     for col, width in enumerate(TRADES_STATUS_WIDTHS, start=1):
@@ -3117,6 +3190,13 @@ def main():
     # trades ledger. IBKR's Flex batch lags ~a day and reqExecutions only returns
     # the current day, so this is what guarantees every day's orders are present.
     merge_todays_executions(rows, trades_ledger, fx_rates)
+    # Drop the fills listed in SUPPRESSED_TRADES (FX rounding residuals and the
+    # like). Done here — after the live fills are spliced in but before
+    # normalisation, FIFO and every sheet builder — so a suppressed trade is
+    # absent from the whole report, not just the sheet it was noticed on.
+    n_dropped = drop_suppressed_trades(rows)
+    if n_dropped:
+        print(f"  [Suppressed] {n_dropped} fill(s) excluded from every sheet.")
     # Express every trade in the base currency (USD) so the report never mixes
     # currencies, even when the account holds FX pairs or non-USD instruments.
     normalize_trades_to_usd(rows, fx_rates)
