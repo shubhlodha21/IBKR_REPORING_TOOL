@@ -542,39 +542,21 @@ def build_order_lookup(ledger):
     return lookup
 
 
-def build_order_time_lookup(ledger):
-    """(symbol, action, normType) -> list of (last_seen_date, first_seen_ts).
+def _ledger_placement_stamp(rec):
+    """Best placement stamp a ledger record can offer, or ''.
 
-    Mirrors build_order_lookup, but carries the placement timestamp instead of
-    the prices, so a filled trade in All Trades can be matched back to the
-    moment its order was first seen (see lookup_order_time)."""
-    lookup = defaultdict(list)
-    for rec in (ledger or {}).values():
-        if not rec.get("first_seen_ts"):
-            continue
-        key = (rec.get("symbol"), (rec.get("action") or "").upper(),
-               _norm_type(rec.get("orderType")))
-        try:
-            seen = dt.date.fromisoformat(rec.get("last_seen", ""))
-        except (ValueError, TypeError):
-            seen = dt.date.min
-        lookup[key].append((seen, rec["first_seen_ts"]))
-    return lookup
-
-
-def lookup_order_time(time_lookup, symbol, action, order_type, trade_date):
-    """Placement timestamp for the ledger order best matching a trade, or ''."""
-    if not time_lookup:
+    `first_seen_ts` is the full timestamp, but only records written since that
+    field was introduced carry one. Every older record still has `first_seen`,
+    the DATE the order was first seen, so fall back to that rather than showing
+    nothing — a date with no time is degraded but true, and it keeps years of
+    historical fills from displaying a blank Order Date & Time."""
+    ts = rec.get("first_seen_ts")
+    if ts:
+        return ts
+    try:
+        return dt.date.fromisoformat(rec["first_seen"]).strftime("%d-%b-%Y")
+    except (KeyError, TypeError, ValueError):
         return ""
-    cands = time_lookup.get((symbol, (action or "").upper(),
-                             _norm_type(order_type)), [])
-    if not cands:
-        return ""
-    td = trade_date or dt.date.min
-    prior = [c for c in cands if c[0] <= td]           # orders seen on/before the trade
-    pick = (max(prior, key=lambda c: c[0]) if prior
-            else min(cands, key=lambda c: abs((c[0] - td).days)))
-    return pick[1]
 
 
 def ledger_placed_at(ledger, order_id=None, perm_id=None):
@@ -584,28 +566,59 @@ def ledger_placed_at(ledger, order_id=None, perm_id=None):
     ledger = ledger or {}
     for key in (order_id, f"C{perm_id}" if perm_id else None):
         if key is not None:
-            rec = ledger.get(str(key))
-            if rec and rec.get("first_seen_ts"):
-                return rec["first_seen_ts"]
+            stamp = _ledger_placement_stamp(ledger.get(str(key)) or {})
+            if stamp:
+                return stamp
     if perm_id:
         for rec in ledger.values():
-            if str(rec.get("permId")) == str(perm_id) and rec.get("first_seen_ts"):
-                return rec["first_seen_ts"]
+            if str(rec.get("permId")) == str(perm_id):
+                stamp = _ledger_placement_stamp(rec)
+                if stamp:
+                    return stamp
     return ""
+
+
+def _ledger_candidates(lookup, symbol, action, order_type):
+    """Ledger entries matching a trade, tolerating the FX symbol mismatch.
+
+    Trades key an FX pair by its full name ("EUR.USD"), but IBKR reports a CASH
+    contract.symbol as the bare BASE currency, so ledger records written before
+    _pair_symbol existed are filed under "EUR". Looking up only the pair would
+    silently miss every one of them — which is why the Trigger/Limit backfill
+    and the order-placement time came up blank on historical FX fills. Try the
+    exact symbol AND the pair's base, pooling both.
+
+    Pooling matters: the same instrument can have records under both spellings —
+    a live order filed as "USD.JPY" today plus older ones filed as "USD". If the
+    exact-symbol bucket were returned on its own, a fill from weeks ago would be
+    dated by today's still-open order and the sheet would show an order time
+    LATER than the execution time. Merging lets _pick_by_date choose the record
+    that actually predates the trade."""
+    if not lookup:
+        return []
+    act, typ = (action or "").upper(), _norm_type(order_type)
+    sym = str(symbol or "")
+    variants = (sym, sym.split(".")[0]) if "." in sym else (sym,)
+    cands = []
+    for candidate_sym in variants:
+        cands.extend(lookup.get((candidate_sym, act, typ), []))
+    return cands
+
+
+def _pick_by_date(cands, trade_date):
+    """The ledger entry closest to (and preferably on/before) the trade date."""
+    td = trade_date or dt.date.min
+    prior = [c for c in cands if c[0] <= td]           # orders seen on/before the trade
+    return (max(prior, key=lambda c: c[0]) if prior
+            else min(cands, key=lambda c: abs((c[0] - td).days)))
 
 
 def lookup_order_prices(order_lookup, symbol, action, order_type, trade_date):
     """Return (limit, trigger) for the ledger order best matching a trade."""
-    if not order_lookup:
-        return None, None
-    key = (symbol, (action or "").upper(), _norm_type(order_type))
-    cands = order_lookup.get(key, [])
+    cands = _ledger_candidates(order_lookup, symbol, action, order_type)
     if not cands:
         return None, None
-    td = trade_date or dt.date.min
-    prior = [c for c in cands if c[0] <= td]           # orders seen on/before the trade
-    pick = (max(prior, key=lambda c: c[0]) if prior
-            else min(cands, key=lambda c: abs((c[0] - td).days)))
+    pick = _pick_by_date(cands, trade_date)
     return pick[1], pick[2]
 
 
@@ -733,21 +746,24 @@ PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
                    "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount"]
 PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
 
-# Trades Status sheet — the Pending Order columns, led by the two lifecycle
-# timestamps and closed by Order_Status, combining live pending orders, today's
-# completed orders, and every filled trade.
-#   Order Date & Time    — when the order was placed (first seen by this tool).
-#   Executed Date & Time — when it actually filled (blank while still pending).
-# The timestamps sit right after Sr No so each asset block reads chronologically
-# left-to-right before the price/quantity detail.
-TRADES_STATUS_HEADERS = (["Sr No", "Order Date & Time (GST)",
-                          "Executed Date & Time (GST)"]
+# Trades Status sheet — the Pending Order columns, led by a single timestamp and
+# closed by Order_Status, combining live pending orders, today's completed
+# orders, and every filled trade.
+#
+# One "Date & Time (GST)" column carries whichever moment matters for that row's
+# status, so there is never a blank half of a pair to read past:
+#   executed          -> when the fill happened
+#   pending           -> when the order was placed (first seen by this tool)
+#   cancelled/refused -> when it stopped working, else when it was placed
+# It sits right after Sr No so each asset block reads chronologically before the
+# price/quantity detail.
+TRADES_STATUS_HEADERS = (["Sr No", "Date & Time (GST)"]
                          + PENDING_HEADERS[1:] + ["Order_Status"])
-TRADES_STATUS_WIDTHS  = [7, 22, 22] + PENDING_WIDTHS[1:] + [20]
+TRADES_STATUS_WIDTHS  = [7, 22] + PENDING_WIDTHS[1:] + [20]
 # Column indexes into a Trades_Status row (0-based), used by the grouping and
 # group-rule logic below.
-TS_COL_SR, TS_COL_ORDERED, TS_COL_EXECUTED = 0, 1, 2
-TS_COL_CONTRACT, TS_COL_NAME = 3, 4
+TS_COL_SR, TS_COL_DATETIME = 0, 1
+TS_COL_CONTRACT, TS_COL_NAME = 2, 3
 TS_COL_STATUS = len(TRADES_STATUS_HEADERS) - 1
 STATUS_PENDING   = "pending"            # live open orders still working
 STATUS_CANCELLED = "cancelled"          # completed order the user cancelled
@@ -769,9 +785,8 @@ def _group_trades_status_rows(rows):
     Rows arrive grouped by kind (all pending, then cancelled, then executed),
     which scatters an asset's BUY and its matching SELL far apart. This regroups
     them by Contract so each asset's whole story sits in one block, ordered
-    chronologically inside the block (executed legs by fill time, then any
-    still-pending legs by the time they were placed). Groups themselves are
-    ordered by their earliest activity, so the sheet still reads oldest-first.
+    oldest-first inside the block by the row's own Date & Time. Groups themselves
+    are ordered by their earliest activity, so the sheet reads oldest-first too.
 
     Sr No is then a plain running count (1,2,3,4,…) over every row, so it stays
     a usable line number once the blocks are in place.
@@ -780,22 +795,10 @@ def _group_trades_status_rows(rows):
     for r in rows:
         groups[str(r[TS_COL_CONTRACT] or "")].append(r)
 
-    def _row_key(r):
-        """Chronological position of one leg within its asset's block."""
-        ordered  = _dt_sort_key(r[TS_COL_ORDERED])
-        executed = _dt_sort_key(r[TS_COL_EXECUTED])
-        # Executed legs first (they have a real fill time); pending legs, whose
-        # executed cell is blank and therefore sorts to datetime.max, fall to
-        # the bottom of the block ordered by when they were placed.
-        return (executed, ordered)
-
     ordered_groups = []
     for contract, grp in groups.items():
-        grp.sort(key=_row_key)
-        # A group sorts by its earliest timestamp of any kind, so a brand-new
-        # pending order doesn't jump ahead of long-settled trades.
-        earliest = min(min(_dt_sort_key(r[TS_COL_EXECUTED]),
-                           _dt_sort_key(r[TS_COL_ORDERED])) for r in grp)
+        grp.sort(key=lambda r: _dt_sort_key(r[TS_COL_DATETIME]))
+        earliest = min(_dt_sort_key(r[TS_COL_DATETIME]) for r in grp)
         ordered_groups.append((earliest, contract, grp))
     ordered_groups.sort(key=lambda g: (g[0], g[1]))
 
@@ -809,12 +812,16 @@ def _group_trades_status_rows(rows):
 
 def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
                              fx_rates=None, ledger=None):
-    """Rows for the Trades_Status sheet (Pending Order layout + Order_Status and
-    the two lifecycle timestamps), from:
+    """Rows for the Trades_Status sheet (Pending Order layout + one Date & Time
+    column + Order_Status), from:
          • live working orders                         → 'pending'
          • today's cancelled completed orders          → 'cancelled'
          • today's rejected/inactive completed orders  → 'did not go through'
          • every filled trade in All Trades            → 'executed'
+
+    Each row's Date & Time is the moment that defines its status — the fill for
+    an executed row, the placement for a pending one, the cancellation for a
+    cancelled one — so the column is meaningful on every row.
 
     Unlike the Pending Order sheet, a working order is listed here even when the
     asset already has an open position. That sheet hides such legs to avoid
@@ -830,7 +837,6 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
     Total Amount is in USD (see _total_amount) so the sheet never mixes
     currencies."""
     rows = []
-    time_lookup = build_order_time_lookup(ledger)
 
     # 1) Live working orders — one row per leg, each with its own status, so a
     #    still-live stop/target on an already-filled entry stays visible.
@@ -852,8 +858,8 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
                    if (o is entry and stop is not None and stop is not entry) else "")
             rows.append([
                 "",                       # Sr No — numbered after grouping
+                # Still working, so the meaningful moment is when it was placed.
                 ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
-                "",                       # not executed yet
                 symbol, "", o["action"], o["orderType"],
                 _fmt_price(o["trigger"]), _fmt_price(o["limit"]),
                 _offset(o["trigger"], o["limit"]),
@@ -873,10 +879,11 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
         label = STATUS_CANCELLED if "cancel" in st else STATUS_REJECTED
         rows.append([
             "",
-            ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
-            # completedTime is when it stopped working — a cancellation/rejection
-            # time, not a fill, so it belongs in the lifecycle-end column.
-            _fmt_tws_time(o.get("completedTime")),
+            # completedTime is when it stopped working — the moment that defines
+            # a cancelled/refused row. Fall back to when it was placed if IBKR
+            # didn't supply one, so the cell is never empty.
+            (_fmt_tws_time(o.get("completedTime"))
+             or ledger_placed_at(ledger, o.get("orderId"), o.get("permId"))),
             o["symbol"], "", o["action"], o["orderType"],
             _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
             _offset(o.get("trigger"), o.get("limit")),
@@ -897,13 +904,9 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
         quote_ccy = contract.split(".")[-1] if "." in contract else BASE_CURRENCY
         total = _total_amount(_num_cell(t[6]), _num_cell(t[7]), None,
                               quote_ccy, fx_rates)
-        executed_at = t[1] or ""          # GST fill time, as All Trades shows it
         rows.append([
             "",
-            lookup_order_time(time_lookup, contract, t[5], t[8],
-                              _dt_sort_key(executed_at).date()
-                              if executed_at else None),
-            executed_at,
+            t[1] or "",                   # GST fill time, as All Trades shows it
             t[3], t[4], t[5], t[8],
             t[9], t[11], t[10], t[12],
             t[6], total,
@@ -1394,8 +1397,12 @@ def _matches_suppressed(r, spec):
     if "action" in spec and _trade_action(r) != str(spec["action"]).upper():
         return False
     if "quantity" in spec:
+        # Compared on the ROUNDED absolute value, because an FX residual is
+        # rarely a whole unit — a 43,750-unit round trip can leave 0.75 behind,
+        # which All Trades formats to 0 decimals and displays as "1". Matching
+        # the raw float against 1 would silently never fire.
         try:
-            if abs(float(r.get("quantity"))) != abs(float(spec["quantity"])):
+            if round(abs(float(r.get("quantity")))) != round(abs(float(spec["quantity"]))):
                 return False
         except (TypeError, ValueError):
             return False
