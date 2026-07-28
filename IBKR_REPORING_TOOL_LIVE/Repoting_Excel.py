@@ -579,30 +579,25 @@ def ledger_placed_at(ledger, order_id=None, perm_id=None):
 
 
 def _ledger_candidates(lookup, symbol, action, order_type):
-    """Ledger entries matching a trade, tolerating the FX symbol mismatch.
+    """Ledger entries matching a trade, by EXACT symbol.
 
-    Trades key an FX pair by its full name ("EUR.USD"), but IBKR reports a CASH
-    contract.symbol as the bare BASE currency, so ledger records written before
-    _pair_symbol existed are filed under "EUR". Looking up only the pair would
-    silently miss every one of them — which is why the Trigger/Limit backfill
-    and the order-placement time came up blank on historical FX fills. Try the
-    exact symbol AND the pair's base, pooling both.
+    Deliberately does NOT fall back to an FX pair's base currency, even though
+    that would match many more records. IBKR files a CASH order under the bare
+    base, so every pre-_pair_symbol record for EUR.USD, EUR.GBP and EUR.CAD
+    shares the key "EUR" — and here all 89 of them also share one last_seen
+    date, leaving _pick_by_date nothing to discriminate on. Such a fallback
+    therefore attaches an arbitrary old order's prices to a fill it never
+    belonged to: a 22-Jun EUR.USD fill picked up a 5-Jun qty-100 order's
+    1.5595/1.6095, levels EUR.USD has never traded at.
 
-    Pooling matters: the same instrument can have records under both spellings —
-    a live order filed as "USD.JPY" today plus older ones filed as "USD". If the
-    exact-symbol bucket were returned on its own, a fill from weeks ago would be
-    dated by today's still-open order and the sheet would show an order time
-    LATER than the execution time. Merging lets _pick_by_date choose the record
-    that actually predates the trade."""
+    A blank Trigger/Limit is the correct answer for those historical fills —
+    the prices really are unknown, and a confidently wrong number is worse than
+    an empty cell. Orders recorded since _pair_symbol are keyed by the full pair
+    and match here exactly."""
     if not lookup:
         return []
-    act, typ = (action or "").upper(), _norm_type(order_type)
-    sym = str(symbol or "")
-    variants = (sym, sym.split(".")[0]) if "." in sym else (sym,)
-    cands = []
-    for candidate_sym in variants:
-        cands.extend(lookup.get((candidate_sym, act, typ), []))
-    return cands
+    return lookup.get((str(symbol or ""), (action or "").upper(),
+                       _norm_type(order_type)), [])
 
 
 def _pick_by_date(cands, trade_date):
