@@ -608,11 +608,66 @@ def _pick_by_date(cands, trade_date):
             else min(cands, key=lambda c: abs((c[0] - td).days)))
 
 
-def lookup_order_prices(order_lookup, symbol, action, order_type, trade_date):
-    """Return (limit, trigger) for the ledger order best matching a trade."""
+# How far a ledger order's own price may sit from the price a trade actually
+# filled at before we refuse to treat it as that trade's order. A stop or limit
+# fills at (or very near) its trigger, so 10% is already far more slack than a
+# real fill needs — it exists only to reject an unrelated order, never to admit
+# a marginal one.
+ORDER_PRICE_TOLERANCE = 0.10
+
+
+def _order_own_price(limit, trigger):
+    """A ledger order's defining price: its trigger, else its limit."""
+    return trigger if trigger is not None else limit
+
+
+def _pick_by_price(cands, trade_price):
+    """Candidate whose own price sits nearest the fill price, or None.
+
+    None means "no candidate is credible" — either the trade carries no usable
+    price, or the nearest order is further away than ORDER_PRICE_TOLERANCE.
+    """
+    try:
+        px = abs(float(trade_price))
+    except (TypeError, ValueError):
+        return None
+    if px <= 0:
+        return None
+    priced = [(abs(float(_order_own_price(c[1], c[2])) - px), c)
+              for c in cands if _order_own_price(c[1], c[2]) is not None]
+    if not priced:
+        return None
+    gap, pick = min(priced, key=lambda p: p[0])
+    return pick if gap / px <= ORDER_PRICE_TOLERANCE else None
+
+
+def lookup_order_prices(order_lookup, symbol, action, order_type, trade_date,
+                        trade_price=None):
+    """Return (limit, trigger) for the ledger order best matching a trade.
+
+    Orders of the same symbol/side/type are indistinguishable by key alone — a
+    bracket re-armed at a new level looks exactly like the one it replaced — so
+    the fill price is what tells them apart. A 2-Jul USD.JPY stop that filled at
+    161.719 belongs to the 161.595 order, not to the 162.43 one still working
+    today; matching on the key and a date tie-break picked the latter and
+    reported a trigger that trade never had.
+
+    When the trade has a price, the nearest credible order wins and NOTHING is
+    returned if none is credible — a blank trigger/limit beats another order's
+    numbers. The date-based pick is used only when there is no price to compare
+    (it remains the sole option for a trade IBKR reports without one).
+
+    One caveat: prices must be on the same basis. Both are the instrument's
+    native quote for FX and for USD instruments, but normalize_trades_to_usd
+    converts a non-USD *stock*'s tradePrice while the ledger keeps the order's
+    native trigger. Such a pair simply fails the tolerance and yields a blank,
+    which is the safe outcome rather than a wrong one."""
     cands = _ledger_candidates(order_lookup, symbol, action, order_type)
     if not cands:
         return None, None
+    if trade_price not in (None, ""):
+        pick = _pick_by_price(cands, trade_price)
+        return (pick[1], pick[2]) if pick else (None, None)
     pick = _pick_by_date(cands, trade_date)
     return pick[1], pick[2]
 
@@ -1056,7 +1111,8 @@ def build_individual_trade_rows(trade_rows, date_filter=None, order_lookup=None,
         # Trigger / limit are order-level fields, absent from Flex trades.
         # Prefer the captured order ledger; fall back to any Flex fields.
         led_lim, led_trg = lookup_order_prices(order_lookup, symbol, action,
-                                               r.get("orderType"), parse_trade_date(r))
+                                               r.get("orderType"), parse_trade_date(r),
+                                               r.get("tradePrice"))
         trigger = (led_trg if led_trg is not None
                    else r.get("triggerPrice") or r.get("auxPrice") or r.get("stopPrice"))
         limit   = (led_lim if led_lim is not None
