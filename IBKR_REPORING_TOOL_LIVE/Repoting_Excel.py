@@ -518,11 +518,22 @@ def load_trades_ledger():
 def update_trades_ledger(ledger, executions):
     """Merge this session's live TWS fills into the persistent trades ledger,
     keyed by IBKR's unique execId. Existing entries are refreshed (e.g. a
-    commission that arrived after the first capture) rather than duplicated."""
+    commission that arrived after the first capture) rather than duplicated.
+
+    A value already recorded is never overwritten with an empty one. execDetails
+    arrives with commission None and commissionReport fills it in asynchronously,
+    so on any run where that report does not land within EXEC_WAIT the same fill
+    comes back with commission None — and a blanket update would wipe the real
+    figure captured earlier. The fill then aggregates as zero commission while
+    All Trades still shows what the previous report published, which is exactly
+    how the Dashboard's Commission drifted below the All Trades column."""
     today = dt.date.today().isoformat()
     for exec_id, ex in (executions or {}).items():
         rec = ledger.get(exec_id, {})
-        rec.update(ex)                      # latest values win (e.g. commission)
+        for k, v in ex.items():
+            if v in (None, "") and rec.get(k) not in (None, ""):
+                continue                    # keep what we already know
+            rec[k] = v
         rec.setdefault("captured_date", today)
         ledger[exec_id] = rec
     return ledger
@@ -1122,6 +1133,7 @@ TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 12, 14, 12, 14, 10, 12, 14, 14, 
 AT_COL_DT_UTC, AT_COL_SR = 0, 2
 AT_COL_CONTRACT, AT_COL_ACTION = 3, 5
 AT_COL_QTY, AT_COL_PRICE = 6, 7
+AT_COL_COMMISSION, AT_COL_PNL = 14, 15
 
 # Gulf Standard Time (Dubai) is UTC+4 — used for the second All Trades time column.
 _GST_OFFSET_HOURS = 4
@@ -1664,6 +1676,84 @@ def _merge_prev_trade_rows(new_rows, prev_rows):
           f"report had them, {carried} carried that IBKR no longer returns, "
           f"{len(out) - frozen - carried} new.")
     return out
+
+
+def _trade_record_key(r):
+    """The _trade_row_key of the All Trades row a trade RECORD produces, so a
+    record and its published row can be matched to each other. Mirrors exactly
+    what build_individual_trade_rows writes into those five cells."""
+    return _trade_row_key([
+        parse_trade_datetime(r), "", "",
+        r.get("symbol") or r.get("description") or "", "",
+        (r.get("buySell") or "").upper().strip(),
+        abs(_flt(r.get("quantity"))), abs(_flt(r.get("tradePrice"))),
+    ])
+
+
+def _apply_frozen_trade_values(rows, all_trade_rows):
+    """Align the trade RECORDS with the All Trades sheet, before aggregating.
+
+    Trade Summary and the Dashboard aggregate the records, while the sheet may
+    show a value carried from the previous report (see _merge_prev_trade_rows)
+    or typed in by hand. When those disagree the report contradicts itself — the
+    Commission column adding up to one figure while the Dashboard reports
+    another, which is exactly what happened when two fills reached All Trades
+    with a commission the current fetch no longer carried.
+
+    The published sheet is the authority here, so its Commission and Realized
+    PnL are written back onto the matching record. Commission keeps the sign
+    convention the record already used (IBKR bills it as a negative amount);
+    the sheet stores it unsigned, so the sign cannot come from there.
+    """
+    if not all_trade_rows:
+        return rows
+    by_key = {}
+    for row in all_trade_rows:
+        by_key.setdefault(_trade_row_key(row), row)
+
+    changed = 0
+    for r in rows:
+        row = by_key.get(_trade_record_key(r))
+        if row is None:
+            continue
+        shown = _num_cell(row[AT_COL_COMMISSION])
+        if shown is not None:
+            held = _flt(r.get("ibCommission") or r.get("commission") or 0)
+            sign = 1.0 if held > 0 else -1.0
+            if abs(abs(held) - abs(shown)) > 0.005:
+                changed += 1
+            r["ibCommission"] = sign * abs(shown)
+            r.pop("commission", None)     # one field, so the `or` chain can't
+                                          # fall back to a stale second copy
+        pnl = _num_cell(row[AT_COL_PNL])
+        if pnl is not None:
+            r["_realized_usd"] = pnl
+    if changed:
+        print(f"  [Reconcile] {changed} fill(s) took their Commission from the "
+              f"All Trades sheet, which the current fetch no longer carried.")
+    return rows
+
+
+def _reconcile_totals(all_trade_rows, agg_all):
+    """Warn when the All Trades columns and the aggregated sheets disagree.
+
+    Trade Summary and the Dashboard are summed from the trade records, All
+    Trades is the row-level sheet, and the two must agree cell for cell. They
+    are built by different code paths, so this is checked rather than assumed —
+    a silent divergence here is what makes a report untrustworthy."""
+    sheet_comm = sum(abs(_num_cell(r[AT_COL_COMMISSION]) or 0) for r in all_trade_rows)
+    sheet_pnl  = sum(_num_cell(r[AT_COL_PNL]) or 0 for r in all_trade_rows)
+    agg_comm   = sum(abs(_flt(c["Commission"])) for c in agg_all)
+    agg_pnl    = sum(_flt(c["PnL"]) for c in agg_all)
+    for label, a, b in (("Commission", sheet_comm, agg_comm),
+                        ("Realized PnL", sheet_pnl, agg_pnl)):
+        if abs(a - b) > 0.01:
+            print(f"  [Reconcile] WARNING: All Trades {label} sums to {a:,.2f} "
+                  f"but Trade Summary / Dashboard report {b:,.2f} "
+                  f"(difference {a - b:,.2f}).", file=sys.stderr)
+        else:
+            print(f"  [Reconcile] {label} agrees across All Trades, "
+                  f"Trade Summary and Dashboard ({a:,.2f}).")
 
 
 def _merge_prev_status_rows(new_rows, prev_rows):
@@ -2915,10 +3005,6 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
         if d >= cutoff_7:
             rows_7.append(row)
 
-    agg_today = aggregate(rows_today)
-    agg_7     = aggregate(rows_7)
-    agg_all   = aggregate(rows)             # all trades returned by IBKR
-
     # Carry forward from the previous report: trigger/limit prices, the rows of
     # All Trades and Trades_Status themselves, the order-placed times, and every
     # manual sheet's rows.
@@ -2933,6 +3019,17 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
                                                  manual_prices=manual_prices)
     all_trade_rows = _merge_prev_trade_rows(all_trade_rows, prev_trade_rows)
     print(f"  [All Trades] {len(all_trade_rows)} individual trade(s).")
+
+    # Write the sheet's Commission / Realized PnL back onto the records BEFORE
+    # aggregating, so Trade Summary and the Dashboard total exactly what All
+    # Trades displays. Aggregating first let the sheet show one figure and the
+    # Dashboard another.
+    _apply_frozen_trade_values(rows, all_trade_rows)
+
+    agg_today = aggregate(rows_today)
+    agg_7     = aggregate(rows_7)
+    agg_all   = aggregate(rows)             # all trades returned by IBKR
+    _reconcile_totals(all_trade_rows, agg_all)
 
     # Static "old account" reference sheets (from OLD_REFERENCE.xlsx). Loaded up
     # front so the Index can list whichever ones are actually available, and so
