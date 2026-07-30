@@ -46,7 +46,15 @@ if not TOKEN or not QUERY_ID:
     sys.exit("Error: IBKR_TOKEN and IBKR_QUERY_ID must be set as environment variables.\n"
              "Copy .env.example to .env and fill in your credentials, then run via run.ps1.")
 
-_REPORTS_DIR = "reports"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Every report is written here, and the carry-forward chain (manual prices, the
+# Trades_Status order-placed times) is read from the same folder — anchored to
+# the SCRIPT's directory, not the shell's. A plain "reports" would resolve
+# against the current working directory, so launching the script from anywhere
+# other than its own folder would quietly write into a different reports/ and
+# start the chain again from nothing.
+_REPORTS_DIR = os.path.join(_BASE_DIR, "reports")
 os.makedirs(_REPORTS_DIR, exist_ok=True)
 OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_%d%b%Y") + ".xlsx")
 
@@ -68,7 +76,6 @@ OLD_REFERENCE_SHEETS = [
 # Persistent order ledger — accumulates trigger/limit from live open orders on
 # every run, so trades can be matched to the prices set when the order was placed.
 # (IBKR does NOT retain this on executed trades, so we must capture it ourselves.)
-_BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 LEDGER_FILE = os.path.join(_BASE_DIR, "orders_ledger.json")
 
 # Persistent trades ledger — accumulates EVERY live TWS execution (fill) across
@@ -2993,21 +3000,11 @@ def _fill_trade_list_sheet(ws, sheet_key, rows):
 
     _style_data_rows(ws, start_row=3, n_cols=n_cols)
 
-    # Highlight today's trades in yellow (Date & Time is column 1).
-    today_str = dt.date.today().strftime("%d-%b-%Y")
-    yellow    = PatternFill("solid", fgColor="FFFF00")
-    for r in range(3, ws.max_row + 1):
-        dt_val = ws.cell(row=r, column=1).value
-        if dt_val and str(dt_val).startswith(today_str):
-            for c in range(1, n_cols + 1):
-                ws.cell(row=r, column=c).fill = yellow
-
     # Amount columns: uniform 1,234.00 number format.
     for h in ("Commission", "Realized PnL"):
         _apply_amount_format(ws, TODAY_HEADERS.index(h) + 1)
 
-    # Shade the Commission / Realized PnL cells green (positive) / red (negative).
-    # Applied after the yellow pass so the colour wins on those cells.
+    # Shade the Realized PnL cells green (positive) / red (negative).
     for h in COLOR_COLUMNS_TRADES:
         col = TODAY_HEADERS.index(h) + 1
         for r in range(3, ws.max_row + 1):
