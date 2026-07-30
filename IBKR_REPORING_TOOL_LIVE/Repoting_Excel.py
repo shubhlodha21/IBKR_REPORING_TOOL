@@ -1117,6 +1117,11 @@ TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", 
                  "Order Type", "Trigger Price", "Offset", "Limit Price", "SL %",
                  "Exchange", "Commission", "Realized PnL", "Account"]
 TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 12, 14, 12, 14, 10, 12, 14, 14, 14]
+# Column indexes into an All Trades row (0-based), used by the carry-forward
+# merge that freezes a fill once a report has published it.
+AT_COL_DT_UTC, AT_COL_SR = 0, 2
+AT_COL_CONTRACT, AT_COL_ACTION = 3, 5
+AT_COL_QTY, AT_COL_PRICE = 6, 7
 
 # Gulf Standard Time (Dubai) is UTC+4 — used for the second All Trades time column.
 _GST_OFFSET_HOURS = 4
@@ -1505,17 +1510,78 @@ def _prev_cell_dt(v):
     return str(v).strip() if v not in (None, "") else ""
 
 
-def _read_trades_status_placed(wb):
-    """Build {row_key: [order-placed time, …]} from a workbook's 'Trades_Status'
-    sheet, so a placement time established once stays fixed in every later
-    report (see _apply_placed_times).
+# Header names a previous report may have used for a column that has since been
+# renamed, so reading one still lines the column up with what it became.
+_PREV_HEADER_ALIASES = {
+    "Date & Time (UTC)": ("Date & Time",),
+    "Order Placed Date & Time (GST)":   ("Order Date & Time (GST)",),
+    # "Date & Time (GST)" is the single-column era's one timestamp. It is read
+    # into the executed column and moved back to the placed column for the rows
+    # where it really meant a placement — see _read_trades_status_rows.
+    "Order Executed Date & Time (GST)": ("Executed Date & Time (GST)",
+                                         "Date & Time (GST)"),
+}
 
-    Columns are resolved by HEADER NAME (row 2), not position, so the chain
-    survives a column move and both earlier layouts still feed it:
-      • the pre-rename pair, 'Order/Executed Date & Time (GST)'
-      • the single 'Date & Time (GST)' column, whose value was a placement time
-        ONLY on a pending row — on an executed row it was the FILL time, so
-        those are read as fill times instead of mistaken for placements.
+
+def _read_prev_sheet_rows(wb, sheet_name, headers):
+    """Rows from a previous report's sheet, remapped into `headers` order.
+
+    Every column is located by header NAME (row 2) and, failing that, by the
+    legacy names in _PREV_HEADER_ALIASES — never by position. A report written
+    by an older version of this script therefore still lines up even though its
+    columns moved or were renamed, and a header that did not exist back then
+    simply reads as ''. Fully-blank rows are dropped so the trailing rows Excel
+    leaves behind don't accumulate.
+    """
+    if sheet_name not in wb.sheetnames:
+        return []
+    raw = list(wb[sheet_name].iter_rows(min_row=2, values_only=True))
+    if not raw:
+        return []
+    prev_header = [str(c).strip() if c is not None else "" for c in raw[0]]
+    src = {}
+    for i, h in enumerate(headers):
+        names = (h,) + _PREV_HEADER_ALIASES.get(h, ())
+        src[i] = next((prev_header.index(n) for n in names if n in prev_header),
+                      None)
+    out = []
+    for row in raw[1:]:
+        if not row or all(c in (None, "") for c in row):
+            continue
+        vals = []
+        for i in range(len(headers)):
+            j = src[i]
+            v = row[j] if (j is not None and j < len(row)) else None
+            vals.append(_prev_cell_dt(v) if isinstance(v, (dt.date, dt.datetime))
+                        else ("" if v is None else v))
+        out.append(vals)
+    return out
+
+
+def _read_trades_status_rows(wb):
+    """A previous report's Trades_Status rows in the CURRENT column layout.
+
+    The single-column era stored one timestamp whose meaning depended on the
+    row: the placement time while the order was still pending, the fill time
+    once it had executed (and the cancellation time for a cancelled one). It is
+    read into the executed column, then moved back to the placed column on
+    pending rows only — the one case where it was a placement. Rows from either
+    two-column layout already carry both and are untouched, since a pending row
+    there has an empty executed cell and so never triggers the move.
+    """
+    rows = _read_prev_sheet_rows(wb, "Trades_Status", TRADES_STATUS_HEADERS)
+    for r in rows:
+        if (str(r[TS_COL_STATUS] or "").strip().lower() == STATUS_PENDING
+                and not str(r[TS_COL_PLACED] or "").strip()
+                and str(r[TS_COL_EXECUTED] or "").strip()):
+            r[TS_COL_PLACED], r[TS_COL_EXECUTED] = r[TS_COL_EXECUTED], ""
+    return rows
+
+
+def _index_placed_times(rows):
+    """{row_key: [order-placed time, …]} from previous Trades_Status rows, so a
+    placement time established once stays fixed in every later report (see
+    _apply_placed_times).
 
     Each row is indexed under both key shapes _lookup_placed tries, so a leg
     that was pending in the previous report is still found once it has filled.
@@ -1523,56 +1589,144 @@ def _read_trades_status_placed(wb):
     round trips in one contract stay separable by date (see _placed_fits).
     """
     placed = defaultdict(list)
-    if "Trades_Status" not in wb.sheetnames:
-        return placed
-    rows = list(wb["Trades_Status"].iter_rows(min_row=2, values_only=True))
-    if not rows:
-        return placed
-    header = [str(c) if c is not None else "" for c in rows[0]]
-
-    def _col(*names):
-        for n in names:
-            if n in header:
-                return header.index(n)
-        return None
-
-    c_placed = _col("Order Placed Date & Time (GST)", "Order Date & Time (GST)")
-    c_exec   = _col("Order Executed Date & Time (GST)",
-                    "Executed Date & Time (GST)")
-    c_single = _col("Date & Time (GST)")
-    c_con, c_act = _col("Contract"), _col("Action")
-    c_typ, c_qty = _col("Type"), _col("Quantity")
-    c_status     = _col("Order_Status")
-    if None in (c_con, c_act, c_typ, c_qty):
-        return placed
-    if c_placed is None and c_single is None:
-        return placed
-
-    for row in rows[1:]:
-        if not row:
-            continue
-        g = lambda i: (row[i] if i is not None and i < len(row) else None)
-        status      = str(g(c_status) or "").strip().lower()
-        placed_at   = _prev_cell_dt(g(c_placed))
-        executed_at = _prev_cell_dt(g(c_exec))
-        if c_placed is None:
-            # Single-column era: that one cell means different things per row.
-            if status == STATUS_PENDING:
-                placed_at = _prev_cell_dt(g(c_single))
-            else:
-                executed_at = executed_at or _prev_cell_dt(g(c_single))
+    for r in rows:
+        placed_at = str(r[TS_COL_PLACED] or "").strip()
         if not placed_at:
             continue
-        con, act, typ, qty = g(c_con), g(c_act), g(c_typ), g(c_qty)
+        executed_at = str(r[TS_COL_EXECUTED] or "").strip()
+        con, act = r[TS_COL_CONTRACT], r[TS_COL_ACTION]
+        typ, qty = r[TS_COL_TYPE], r[TS_COL_QTY]
         keys = [_ts_order_key(con, act, typ, qty)]
         if executed_at:
             keys.append(_ts_fill_key(con, act, executed_at))
-        if status == STATUS_PENDING:
+        if str(r[TS_COL_STATUS] or "").strip().lower() == STATUS_PENDING:
             keys.append(_ts_order_key(con, act, typ, qty, pending=True))
         for k in keys:
             if placed_at not in placed[k]:
                 placed[k].append(placed_at)
     return dict(placed)
+
+
+def _trade_row_key(row):
+    """Identity of an All Trades row, tolerant of formatting differences between
+    report versions: the fill's UTC timestamp, contract and side, plus quantity
+    and price compared as NUMBERS rather than as the strings they display as (an
+    older report may have written '43,750' where this one writes '43750')."""
+    def _num(v, dp):
+        try:
+            return f"{abs(float(str(v).replace(',', ''))):.{dp}f}"
+        except (TypeError, ValueError):
+            return str(v or "").strip().upper()
+    return (str(row[AT_COL_DT_UTC] or "").strip(),
+            str(row[AT_COL_CONTRACT] or "").strip().upper(),
+            str(row[AT_COL_ACTION] or "").strip().upper()[:1],
+            _num(row[AT_COL_QTY], 0), _num(row[AT_COL_PRICE], 4))
+
+
+def _merge_prev_trade_rows(new_rows, prev_rows):
+    """All Trades: keep every row the previous report had, exactly as it had it.
+
+    A published fill is history and is frozen here. Where the same fill appears
+    in both, the PREVIOUS report's row wins, so neither a restatement by IBKR
+    nor a change in how this script derives a cell can alter what an earlier
+    report already showed. Rows the current fetch no longer returns — Flex's
+    window has a horizon, and reqExecutions only covers today — are kept instead
+    of silently vanishing. Genuinely new fills are added.
+
+    Rows are re-sorted newest-first and Sr No renumbered, so the sheet still
+    reads the way it always did once carried and fresh rows are interleaved.
+    """
+    if not prev_rows:
+        return new_rows
+    prev_by_key = {}
+    for r in prev_rows:
+        prev_by_key.setdefault(_trade_row_key(r), r)
+
+    out, seen, carried, frozen = [], set(), 0, 0
+    for r in new_rows:
+        k = _trade_row_key(r)
+        seen.add(k)
+        if k in prev_by_key:
+            out.append(list(prev_by_key[k]))
+            frozen += 1
+        else:
+            out.append(r)
+    for k, r in prev_by_key.items():
+        if k not in seen:
+            out.append(list(r))
+            carried += 1
+
+    out.sort(key=lambda r: (_ts_moment(r[AT_COL_DT_UTC]) or dt.datetime.min),
+             reverse=True)
+    for sr, r in enumerate(out, start=1):
+        r[AT_COL_SR] = sr
+    print(f"  [Carry-forward] All Trades: {frozen} row(s) kept as the previous "
+          f"report had them, {carried} carried that IBKR no longer returns, "
+          f"{len(out) - frozen - carried} new.")
+    return out
+
+
+def _merge_prev_status_rows(new_rows, prev_rows):
+    """Trades_Status: freeze the rows that are history, rebuild the live ones.
+
+    A terminal row — executed, cancelled, did not go through — is published fact
+    and is reused exactly as the previous report had it, and one the current
+    fetch no longer produces is carried rather than dropped. That is what stops
+    a cancelled order disappearing the next day: cancellations are only ever
+    read from TODAY's completed orders, so without this the row exists for
+    exactly one report.
+
+    A 'pending' row is deliberately NOT frozen or carried. Pending is a live
+    state, not history: an order working yesterday has since filled (it returns
+    as its own executed row) or was cancelled, so re-appending the stale row
+    would show one leg twice in two contradictory states — and a leg still
+    working may have been re-armed at a new trigger, which the live feed knows
+    and the old row does not. Its placement time still carries over, by the
+    separate and narrower route in _apply_placed_times.
+    """
+    if not prev_rows:
+        return new_rows
+
+    def _key(r):
+        """Identity of a terminal row. The timestamp in its executed column is
+        unique to it — a fill time, or the moment a cancelled order stopped
+        working — so that alone identifies the row. Only a row with no timestamp
+        at all falls back to the order shape, which cannot tell two round trips
+        of the same contract apart and would otherwise let an old fill stand in
+        for a new one."""
+        executed_at = str(r[TS_COL_EXECUTED] or "").strip()
+        if executed_at:
+            return _ts_fill_key(r[TS_COL_CONTRACT], r[TS_COL_ACTION], executed_at)
+        return _ts_order_key(r[TS_COL_CONTRACT], r[TS_COL_ACTION],
+                             r[TS_COL_TYPE], r[TS_COL_QTY])
+
+    terminal = {}
+    for r in prev_rows:
+        if str(r[TS_COL_STATUS] or "").strip().lower() == STATUS_PENDING:
+            continue
+        terminal.setdefault(_key(r), r)
+
+    out, seen, frozen = [], set(), 0
+    for r in new_rows:
+        k = _key(r)
+        seen.add(k)
+        # Only a terminal row may be replaced by its frozen twin; a pending row
+        # keeps what the live feed just said about it.
+        if k in terminal and str(r[TS_COL_STATUS] or "").strip().lower() != STATUS_PENDING:
+            out.append(list(terminal[k]))
+            frozen += 1
+        else:
+            out.append(r)
+    carried = 0
+    for k, r in terminal.items():
+        if k not in seen:
+            out.append(list(r))
+            seen.add(k)
+            carried += 1
+    print(f"  [Carry-forward] Trades_Status: {frozen} terminal row(s) kept as the "
+          f"previous report had them, {carried} carried that are no longer "
+          f"reported.")
+    return _group_trades_status_rows(out)
 
 
 def load_previous_report():
@@ -1582,19 +1736,21 @@ def load_previous_report():
 
       - manual Trigger/Limit prices from the 'All Trades' sheet, keyed by
         (datetime, contract, action, qty, price) so they re-attach to the same fill
-      - the Order Placed times from the 'Trades_Status' sheet, which live only in
-        the report chain (see _read_trades_status_placed)
+      - every row of 'All Trades' and 'Trades_Status', so a row this report
+        already published is reproduced instead of rebuilt (see
+        _merge_prev_trade_rows / _merge_prev_status_rows). The Order Placed times
+        are indexed off those same rows, since they live only in the chain.
       - the running rows of every manually-filled sheet: Strategy Details, Bugs,
         Shubham_Activity and Ajay_Activity
 
-    Returns (manual_prices: dict, placed_times: dict,
-             carried: {sheet_name: list-of-rows}).
+    Returns (manual_prices: dict, placed_times: dict, prev_trade_rows: list,
+             prev_status_rows: list, carried: {sheet_name: list-of-rows}).
     """
     from openpyxl import load_workbook
 
     reports = _list_previous_reports()
     if not reports:
-        return {}, {}, {}
+        return {}, {}, [], [], {}
     prev_path = reports[0]
 
     try:
@@ -1604,11 +1760,14 @@ def load_previous_report():
         wb = load_workbook(prev_path, data_only=True)
     except Exception as e:                                  # noqa: BLE001
         print(f"  [Carry-forward] could not open {prev_path}: {e}", file=sys.stderr)
-        return {}, {}, {}
+        return {}, {}, [], [], {}
 
-    # Trigger/limit prices and order-placed times from the most recent report.
-    manual_prices = _read_alltrades_prices(wb)
-    placed_times  = _read_trades_status_placed(wb)
+    # Trigger/limit prices, then the two data sheets whose rows are frozen once
+    # published. Order-placed times are indexed off the Trades_Status rows.
+    manual_prices    = _read_alltrades_prices(wb)
+    prev_trade_rows  = _read_prev_sheet_rows(wb, "All Trades", TODAY_HEADERS)
+    prev_status_rows = _read_trades_status_rows(wb)
+    placed_times     = _index_placed_times(prev_status_rows)
 
     # Manual sheets copied verbatim (headers + every data row, no blanks).
     carried = {name: _read_manual_sheet(wb, name) for name in _VERBATIM_SHEETS}
@@ -1621,7 +1780,8 @@ def load_previous_report():
     # neither is lost. Each is recovered independently — the Trades_Status sheet
     # is newer than the All Trades one, so the last report to carry either is
     # not necessarily the same file.
-    if not manual_prices or not placed_times:
+    if not manual_prices or not placed_times or not prev_status_rows \
+            or not prev_trade_rows:
         for older in reports[1:]:
             try:
                 w2 = load_workbook(older, read_only=True, data_only=True)
@@ -1633,23 +1793,34 @@ def load_previous_report():
                     manual_prices = mp
                     print(f"  [Carry-forward] recovered {len(mp)} trigger/limit "
                           f"price(s) from {os.path.basename(older)}.")
-            if not placed_times:
-                pt = _read_trades_status_placed(w2)
-                if pt:
-                    placed_times = pt
-                    print(f"  [Carry-forward] recovered {len(pt)} order-placed "
-                          f"time(s) from {os.path.basename(older)}.")
+            if not prev_trade_rows:
+                tr = _read_prev_sheet_rows(w2, "All Trades", TODAY_HEADERS)
+                if tr:
+                    prev_trade_rows = tr
+                    print(f"  [Carry-forward] recovered {len(tr)} All Trades "
+                          f"row(s) from {os.path.basename(older)}.")
+            if not prev_status_rows:
+                sr = _read_trades_status_rows(w2)
+                if sr:
+                    prev_status_rows = sr
+                    placed_times = placed_times or _index_placed_times(sr)
+                    print(f"  [Carry-forward] recovered {len(sr)} Trades_Status "
+                          f"row(s) from {os.path.basename(older)}.")
             w2.close()
-            if manual_prices and placed_times:
+            if (manual_prices and placed_times and prev_trade_rows
+                    and prev_status_rows):
                 break
     def _n_rows(v):
         # Verbatim sheets store (headers, rows); data-only sheets store rows.
         return len(v[1]) if isinstance(v, tuple) else len(v)
     counts = ", ".join(f"{_n_rows(v)} {k}" for k, v in carried.items())
     print(f"  [Carry-forward] {len(manual_prices)} trigger/limit price(s); "
+          f"{len(prev_trade_rows)} All Trades row(s); "
+          f"{len(prev_status_rows)} Trades_Status row(s); "
           f"{len(placed_times)} order-placed key(s); "
           f"{counts} from {os.path.basename(prev_path)}.")
-    return manual_prices, placed_times, carried
+    return (manual_prices, placed_times, prev_trade_rows, prev_status_rows,
+            carried)
 
 
 # ----------------------------------------------------------------------
@@ -1816,7 +1987,69 @@ def build_fx_rate_map(flex_rows, open_positions=None):
     return out
 
 
-def _executions_to_flex_rows(executions, fx_rates=None):
+def _fill_order_key(symbol, action, qty=None):
+    """Shape shared by a fill and the order it came from. `qty` omitted gives the
+    looser symbol/side key, which still matches when an order filled in parts."""
+    key = (str(symbol or "").upper(), str(action or "").upper()[:1])
+    return key if qty is None else key + (_ts_qty_key(qty),)
+
+
+def _build_completed_order_index(completed_orders):
+    """{fill key: [filled completed order, …]} for tying a live fill to its order.
+
+    Only orders TWS reports as filled are indexed — a cancelled order never
+    produced a fill. Both the exact (symbol, side, quantity) key and the looser
+    (symbol, side) one are built, so an order that filled in parts is still
+    found even though its total quantity differs from the individual fill."""
+    idx = defaultdict(list)
+    for o in (completed_orders or []):
+        if "fill" not in (o.get("status") or "").lower():
+            continue
+        idx[_fill_order_key(o.get("symbol"), o.get("action"),
+                            o.get("quantity"))].append(o)
+        idx[_fill_order_key(o.get("symbol"), o.get("action"))].append(o)
+    return idx
+
+
+def _order_for_fill(index, symbol, action, qty, price):
+    """The completed order a live fill came from, or None.
+
+    TWS reports order type, trigger and limit on the ORDER, never on the
+    execution — so a live fill spliced in ahead of the Flex batch has none of
+    them. That blanked All Trades' Order Type, and with it the trigger/limit
+    backfill, which keys the order ledger BY order type and so matched nothing.
+
+    Matched on symbol/side/quantity, then on symbol/side alone for a partial
+    fill. Where several orders share a shape (a bracket re-armed at a new level
+    looks exactly like the one it replaced) the fill price picks the one it
+    actually came from, the same test lookup_order_prices applies."""
+    if not index:
+        return None
+    for key in (_fill_order_key(symbol, action, qty),
+                _fill_order_key(symbol, action)):
+        cands = index.get(key)
+        if not cands:
+            continue
+        if len(cands) == 1:
+            return cands[0]
+        try:
+            px = abs(float(price))
+        except (TypeError, ValueError):
+            px = 0.0
+        priced = [(abs(float(_order_own_price(o.get("limit"), o.get("trigger"))) - px), o)
+                  for o in cands
+                  if _order_own_price(o.get("limit"), o.get("trigger")) is not None]
+        if not px or not priced:
+            # Nothing to discriminate on (e.g. every candidate is a MKT order
+            # with no price of its own); they share a type, which is the field
+            # that matters most here.
+            return cands[0]
+        gap, pick = min(priced, key=lambda p: p[0])
+        return pick if gap / px <= ORDER_PRICE_TOLERANCE else cands[0]
+    return None
+
+
+def _executions_to_flex_rows(executions, fx_rates=None, completed_orders=None):
     """Reshape this session's live TWS fills (reqExecutions) into the same
     Flex-trade dicts parse_trades produces, so today's buy/sell fills can flow
     into All Trades / Trade Summary / Open Positions before IBKR's end-of-day
@@ -1825,8 +2058,14 @@ def _executions_to_flex_rows(executions, fx_rates=None):
     fx_rates (currency -> fxRateToBase, see build_fx_rate_map) supplies the
     conversion rate the execution feed omits, so a non-USD fill (e.g. the JPY leg
     of USD.JPY) is normalized to USD consistently with its Flex counterpart —
-    otherwise one leg stays in JPY and the summed PnL is nonsense."""
+    otherwise one leg stays in JPY and the summed PnL is nonsense.
+
+    completed_orders supplies what the execution feed itself cannot: the order
+    type, trigger and limit of the order each fill came from (see
+    _order_for_fill). Without it today's fill lands in All Trades with those
+    three cells blank."""
     fx_rates = fx_rates or {}
+    order_index = _build_completed_order_index(completed_orders)
     out = []
     for exec_id, ex in executions.items():
         qty   = _flt(ex.get("quantity"))
@@ -1842,6 +2081,10 @@ def _executions_to_flex_rows(executions, fx_rates=None):
         # detection all match the Flex history.
         symbol = (ex.get("localSymbol") or ex.get("contract") or ""
                   ) if sectype == "CASH" else (ex.get("contract") or "")
+        # The order this fill came from, for the three fields the execution feed
+        # omits. Absent for a fill from a previous day (completed orders only
+        # cover today), which keeps its blanks until the Flex batch supplies them.
+        src = _order_for_fill(order_index, symbol, ex.get("action"), qty, price)
         out.append({
             "symbol":          symbol,
             "description":     ex.get("localSymbol") or "",
@@ -1864,13 +2107,21 @@ def _executions_to_flex_rows(executions, fx_rates=None):
             "dateTime":        str(ex.get("time") or ""),
             "currency":        ccy,
             "fxRateToBase":    rate,          # None -> normalize treats as 1.0
-            "orderType":       "",
+            # From the originating order, not the fill: TWS reports these on the
+            # order only. build_individual_trade_rows prefers the order ledger
+            # for the prices and falls back to these, and it reads Order Type
+            # straight from here — so a blank orderType also cost the trigger,
+            # the ledger being keyed by type.
+            "orderType":       (src.get("orderType") or "") if src else "",
+            "triggerPrice":    src.get("trigger") if src else None,
+            "limitPrice":      src.get("limit")   if src else None,
             "accountId":       ex.get("account") or "",
         })
     return out
 
 
-def merge_todays_executions(flex_rows, executions, fx_rates=None):
+def merge_todays_executions(flex_rows, executions, fx_rates=None,
+                            completed_orders=None):
     """Splice live TWS fills (this session's + every prior day's, from the trades
     ledger) into the Flex trade rows in place. A fill is skipped only when the
     Flex batch already contains an equivalent trade (matched on
@@ -1902,7 +2153,7 @@ def merge_todays_executions(flex_rows, executions, fx_rates=None):
     flex_keys     = {_key(r) for r in flex_rows}
     flex_exec_ids = {e for e in (_exec_id(r) for r in flex_rows) if e}
     added = 0
-    for r in _executions_to_flex_rows(executions, fx_rates):
+    for r in _executions_to_flex_rows(executions, fx_rates, completed_orders):
         # Skip if the Flex batch already has this fill — by exact execId (when the
         # Flex query exposes ibExecID) or by the fuzzy field key otherwise.
         if _exec_id(r) in flex_exec_ids or _key(r) in flex_keys:
@@ -2668,14 +2919,19 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     agg_7     = aggregate(rows_7)
     agg_all   = aggregate(rows)             # all trades returned by IBKR
 
-    # Carry forward from the previous report: trigger/limit prices (All Trades),
-    # the Trades_Status order-placed times, and every manual sheet's rows.
-    manual_prices, placed_times, carried = load_previous_report()
+    # Carry forward from the previous report: trigger/limit prices, the rows of
+    # All Trades and Trades_Status themselves, the order-placed times, and every
+    # manual sheet's rows.
+    (manual_prices, placed_times, prev_trade_rows,
+     prev_status_rows, carried) = load_previous_report()
 
     # All Trades: every individual trade IBKR returns (ledger trigger/limit,
-    # with manually-entered prices from the previous report taking precedence).
+    # with manually-entered prices from the previous report taking precedence),
+    # then reconciled against the previous report so a fill it already published
+    # is reproduced exactly and none of its rows can be lost.
     all_trade_rows = build_individual_trade_rows(rows, order_lookup=order_lookup,
                                                  manual_prices=manual_prices)
+    all_trade_rows = _merge_prev_trade_rows(all_trade_rows, prev_trade_rows)
     print(f"  [All Trades] {len(all_trade_rows)} individual trade(s).")
 
     # Static "old account" reference sheets (from OLD_REFERENCE.xlsx). Loaded up
@@ -2737,6 +2993,10 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     trades_status_rows = build_trades_status_rows(orders_by_symbol, completed_orders,
                                                   all_trade_rows, fx_rates, ledger,
                                                   placed_times)
+    # Freeze the rows the previous report already published (executed/cancelled)
+    # and keep any it had that are no longer reported; pending rows stay live.
+    trades_status_rows = _merge_prev_status_rows(trades_status_rows,
+                                                prev_status_rows)
     _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
     n_groups = len({r[TS_COL_CONTRACT] for r in trades_status_rows})
     n_placed = sum(1 for r in trades_status_rows if r[TS_COL_PLACED])
@@ -3481,7 +3741,7 @@ def main():
     # Splice in live TWS fills — this session's plus every prior day's from the
     # trades ledger. IBKR's Flex batch lags ~a day and reqExecutions only returns
     # the current day, so this is what guarantees every day's orders are present.
-    merge_todays_executions(rows, trades_ledger, fx_rates)
+    merge_todays_executions(rows, trades_ledger, fx_rates, completed_orders)
     # Drop the fills listed in SUPPRESSED_TRADES (FX rounding residuals and the
     # like). Done here — after the live fills are spliced in but before
     # normalisation, FIFO and every sheet builder — so a suppressed trade is
