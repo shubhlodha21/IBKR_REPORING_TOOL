@@ -433,12 +433,13 @@ def update_order_ledger(ledger, orders_by_symbol, completed_orders=None):
     Each record also keeps `first_seen_ts` — the wall-clock (GST) moment the
     order was FIRST observed by this tool. IBKR's open-order feed carries no
     placement timestamp, so first observation is the closest stand-in we have
-    for "when the order was placed"; it is what the Trades_Status sheet shows
-    in its Order Date & Time column. Because the same order is keyed by its
-    orderId while open but by permId once completed, the completed record
-    inherits the open record's `first_seen_ts` via the permId index below, so
-    an order placed and filled while the tool is running keeps its real
-    placement time instead of being restamped at fill.
+    for "when the order was placed"; it seeds the Trades_Status sheet's Order
+    Placed Date & Time column the first time an order is seen, after which the
+    report chain owns the value (see _apply_placed_times). Because the same
+    order is keyed by its orderId while open but by permId once completed, the
+    completed record inherits the open record's `first_seen_ts` via the permId
+    index below, so an order placed and filled while the tool is running keeps
+    its real placement time instead of being restamped at fill.
     """
     today = dt.date.today().isoformat()
     now   = _gst_now_str()
@@ -549,7 +550,7 @@ def _ledger_placement_stamp(rec):
     field was introduced carry one. Every older record still has `first_seen`,
     the DATE the order was first seen, so fall back to that rather than showing
     nothing — a date with no time is degraded but true, and it keeps years of
-    historical fills from displaying a blank Order Date & Time."""
+    historical fills from displaying a blank Order Placed Date & Time."""
     ts = rec.get("first_seen_ts")
     if ts:
         return ts
@@ -796,24 +797,34 @@ PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
                    "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount"]
 PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
 
-# Trades Status sheet — the Pending Order columns, led by a single timestamp and
-# closed by Order_Status, combining live pending orders, today's completed
-# orders, and every filled trade.
+# Trades Status sheet — the Pending Order columns, led by the two lifecycle
+# timestamps and closed by Order_Status, combining live pending orders, today's
+# completed orders, and every filled trade.
 #
-# One "Date & Time (GST)" column carries whichever moment matters for that row's
-# status, so there is never a blank half of a pair to read past:
-#   executed          -> when the fill happened
-#   pending           -> when the order was placed (first seen by this tool)
-#   cancelled/refused -> when it stopped working, else when it was placed
-# It sits right after Sr No so each asset block reads chronologically before the
-# price/quantity detail.
-TRADES_STATUS_HEADERS = (["Sr No", "Date & Time (GST)"]
+# The two timestamps come from independent sources and neither is ever filled
+# with a stand-in — a blank cell means "not known", not "not applicable":
+#   Order Placed   -> carried forward from the previous report, so a placement
+#                     time is fixed the first time it is established and can
+#                     never be re-dated by a later run. Only a live order this
+#                     tool is seeing for the FIRST time is stamped fresh, from
+#                     the ledger's first_seen_ts.
+#   Order Executed -> straight from IBKR: the real fill time (as All Trades
+#                     shows it) on an executed row, completedTime on a
+#                     cancelled/refused one, and blank on a pending row, which
+#                     by definition has not executed yet.
+# Both sit right after Sr No so each asset block reads chronologically before
+# the price/quantity detail.
+TRADES_STATUS_HEADERS = (["Sr No", "Order Placed Date & Time (GST)",
+                          "Order Executed Date & Time (GST)"]
                          + PENDING_HEADERS[1:] + ["Order_Status"])
-TRADES_STATUS_WIDTHS  = [7, 22] + PENDING_WIDTHS[1:] + [20]
-# Column indexes into a Trades_Status row (0-based), used by the grouping and
-# group-rule logic below.
-TS_COL_SR, TS_COL_DATETIME = 0, 1
-TS_COL_CONTRACT, TS_COL_NAME = 2, 3
+TRADES_STATUS_WIDTHS  = [7, 26, 26] + PENDING_WIDTHS[1:] + [20]
+# Column indexes into a Trades_Status row (0-based), used by the grouping,
+# group-rule and carry-forward logic below.
+TS_COL_SR = 0
+TS_COL_PLACED, TS_COL_EXECUTED = 1, 2
+TS_COL_CONTRACT, TS_COL_NAME   = 3, 4
+TS_COL_ACTION, TS_COL_TYPE     = 5, 6
+TS_COL_QTY                     = 11
 TS_COL_STATUS = len(TRADES_STATUS_HEADERS) - 1
 STATUS_PENDING   = "pending"            # live open orders still working
 STATUS_CANCELLED = "cancelled"          # completed order the user cancelled
@@ -829,14 +840,24 @@ def _num_cell(v):
         return None
 
 
+def _ts_row_moment(r):
+    """The moment a Trades_Status row sorts on: its fill when it has one, else
+    when the order was placed. Rows with neither sort last (datetime.max)."""
+    executed = _dt_sort_key(r[TS_COL_EXECUTED])
+    if executed != dt.datetime.max:
+        return executed
+    return _dt_sort_key(r[TS_COL_PLACED])
+
+
 def _group_trades_status_rows(rows):
     """Bind every row belonging to the same asset together.
 
     Rows arrive grouped by kind (all pending, then cancelled, then executed),
     which scatters an asset's BUY and its matching SELL far apart. This regroups
     them by Contract so each asset's whole story sits in one block, ordered
-    oldest-first inside the block by the row's own Date & Time. Groups themselves
-    are ordered by their earliest activity, so the sheet reads oldest-first too.
+    oldest-first inside the block by the row's own defining moment (see
+    _ts_row_moment). Groups themselves are ordered by their earliest activity,
+    so the sheet reads oldest-first too.
 
     Sr No is then a plain running count (1,2,3,4,…) over every row, so it stays
     a usable line number once the blocks are in place.
@@ -847,8 +868,8 @@ def _group_trades_status_rows(rows):
 
     ordered_groups = []
     for contract, grp in groups.items():
-        grp.sort(key=lambda r: _dt_sort_key(r[TS_COL_DATETIME]))
-        earliest = min(_dt_sort_key(r[TS_COL_DATETIME]) for r in grp)
+        grp.sort(key=_ts_row_moment)
+        earliest = min(_ts_row_moment(r) for r in grp)
         ordered_groups.append((earliest, contract, grp))
     ordered_groups.sort(key=lambda g: (g[0], g[1]))
 
@@ -860,18 +881,122 @@ def _group_trades_status_rows(rows):
     return out
 
 
+def _ts_qty_key(v):
+    """Quantity as a key that survives a round trip through Excel, which hands
+    back 43750 or 43750.0 where the sheet was written '43,750'."""
+    try:
+        return str(int(round(float(str(v).replace(",", "")))))
+    except (TypeError, ValueError):
+        return str(v or "").strip()
+
+
+def _ts_fill_key(contract, action, executed_at):
+    """Identity of an EXECUTED row. A fill's own timestamp pins it exactly, so
+    two otherwise identical round trips in the same contract never collide."""
+    return ("fill", str(contract or "").upper(), str(action or "").upper(),
+            str(executed_at or "").strip())
+
+
+def _ts_order_key(contract, action, order_type, qty, pending=False):
+    """Identity of an ORDER leg. Deliberately excludes both timestamps: this is
+    the key that has to keep matching when a leg goes pending → executed, and
+    the fill time only exists at the far end of that transition. `pending`
+    namespaces the key so a leg that was still working in the previous report is
+    preferred over an already-closed one with the same shape."""
+    return ("pending-order" if pending else "order",
+            str(contract or "").upper(), str(action or "").upper(),
+            _norm_type(order_type), _ts_qty_key(qty))
+
+
+def _ts_moment(s):
+    """A displayed timestamp cell as a datetime, whether or not it carries a
+    time of day (the ledger degrades to a bare date for older records), or None
+    when there is nothing to compare."""
+    for fmt in (_DT_FMT, "%d-%b-%Y"):
+        try:
+            return dt.datetime.strptime(str(s).strip(), fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _placed_fits(placed_at, executed_at):
+    """False when `placed_at` provably falls AFTER the fill it would be paired
+    with — an order cannot be placed after it executes.
+
+    This guards the order-shape fallback below, which is unavoidably ambiguous:
+    two round trips in the same contract, side, type and size share that key, so
+    a fill from weeks ago would otherwise be dated by an order still working
+    today. Anything not comparable is kept rather than discarded."""
+    p, e = _ts_moment(placed_at), _ts_moment(executed_at)
+    if p is None or e is None:
+        return True
+    return p <= e
+
+
+def _lookup_placed(placed_times, row):
+    """The previous report's Order Placed time for `row`, or ''.
+
+    Keys are tried most-specific first: the fill fingerprint (exact, for a row
+    that has already executed), then a leg that was still pending in that report
+    — which is how a leg keeps its placement time through the pending → executed
+    transition, where the fill key cannot yet match — then any leg of the same
+    shape. Within one key the latest candidate that predates the fill wins, so
+    the placement paired with a fill is the most recent one that could actually
+    have produced it."""
+    keys = []
+    executed_at = str(row[TS_COL_EXECUTED] or "").strip()
+    if executed_at:
+        keys.append(_ts_fill_key(row[TS_COL_CONTRACT], row[TS_COL_ACTION],
+                                 executed_at))
+    for pending in (True, False):
+        keys.append(_ts_order_key(row[TS_COL_CONTRACT], row[TS_COL_ACTION],
+                                  row[TS_COL_TYPE], row[TS_COL_QTY], pending))
+    for k in keys:
+        usable = [p for p in placed_times.get(k, ())
+                  if p and _placed_fits(p, executed_at)]
+        if usable:
+            return max(usable, key=lambda p: (_ts_moment(p) or dt.datetime.min))
+    return ""
+
+
+def _apply_placed_times(rows, placed_times):
+    """Overwrite each row's Order Placed cell with the previous report's value.
+
+    The report chain is the authority for this column: once a placement time has
+    been written into it, every later report reuses that exact value, so an order
+    can never be re-dated by a subsequent run. The ledger stamp a live row was
+    seeded with only survives when the chain has nothing for that leg — which is
+    how a newly-placed order enters the chain in the first place.
+
+    This is why the column is sourced from the report rather than recomputed:
+    the ledger's first_seen_ts is "when this tool first saw the order", so a
+    rebuilt or relocated ledger silently restamps an order that was actually
+    placed weeks earlier.
+    """
+    if not placed_times:
+        return rows
+    for r in rows:
+        carried = _lookup_placed(placed_times, r)
+        if carried:
+            r[TS_COL_PLACED] = carried
+    return rows
+
+
 def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
-                             fx_rates=None, ledger=None):
-    """Rows for the Trades_Status sheet (Pending Order layout + one Date & Time
-    column + Order_Status), from:
+                             fx_rates=None, ledger=None, placed_times=None):
+    """Rows for the Trades_Status sheet (Pending Order layout + the two
+    lifecycle timestamps + Order_Status), from:
          • live working orders                         → 'pending'
          • today's cancelled completed orders          → 'cancelled'
          • today's rejected/inactive completed orders  → 'did not go through'
          • every filled trade in All Trades            → 'executed'
 
-    Each row's Date & Time is the moment that defines its status — the fill for
-    an executed row, the placement for a pending one, the cancellation for a
-    cancelled one — so the column is meaningful on every row.
+    Order Executed Date & Time is IBKR's own: the fill time for an executed row,
+    completedTime for a cancelled/refused one, and deliberately blank for a
+    pending row. Order Placed Date & Time comes from `placed_times` — the
+    previous report's column, see _read_trades_status_placed — falling back to
+    the ledger's first_seen_ts only for a live order not yet in that chain.
 
     Unlike the Pending Order sheet, a working order is listed here even when the
     asset already has an open position. That sheet hides such legs to avoid
@@ -908,8 +1033,10 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
                    if (o is entry and stop is not None and stop is not entry) else "")
             rows.append([
                 "",                       # Sr No — numbered after grouping
-                # Still working, so the meaningful moment is when it was placed.
+                # Seed only: the previous report's value replaces this below
+                # whenever the chain already carries one for this leg.
                 ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
+                "",                       # not executed — it is still working
                 symbol, "", o["action"], o["orderType"],
                 _fmt_price(o["trigger"]), _fmt_price(o["limit"]),
                 _offset(o["trigger"], o["limit"]),
@@ -929,11 +1056,11 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
         label = STATUS_CANCELLED if "cancel" in st else STATUS_REJECTED
         rows.append([
             "",
-            # completedTime is when it stopped working — the moment that defines
-            # a cancelled/refused row. Fall back to when it was placed if IBKR
-            # didn't supply one, so the cell is never empty.
-            (_fmt_tws_time(o.get("completedTime"))
-             or ledger_placed_at(ledger, o.get("orderId"), o.get("permId"))),
+            ledger_placed_at(ledger, o.get("orderId"), o.get("permId")),
+            # completedTime is IBKR's moment for the end of this order's life —
+            # a cancellation/rejection rather than a fill, but it is the only
+            # thing that ever went into the executed column for such a row.
+            _fmt_tws_time(o.get("completedTime")),
             o["symbol"], "", o["action"], o["orderType"],
             _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
             _offset(o.get("trigger"), o.get("limit")),
@@ -956,6 +1083,12 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
                               quote_ccy, fx_rates)
         rows.append([
             "",
+            # A fill carries no order id, so nothing can key it to a ledger
+            # record — the placement time can only come from the report chain
+            # below, and stays blank until it does. (Reconstructing one from a
+            # symbol/action lookup was tried and removed: it dated fills weeks
+            # old by orders still open today.)
+            "",
             t[1] or "",                   # GST fill time, as All Trades shows it
             t[3], t[4], t[5], t[8],
             t[9], t[11], t[10], t[12],
@@ -969,6 +1102,7 @@ def build_trades_status_rows(orders_by_symbol, completed_orders, all_trade_rows,
     for row in rows:
         if not row[TS_COL_NAME]:
             row[TS_COL_NAME] = row[TS_COL_CONTRACT]
+    _apply_placed_times(rows, placed_times)
     return _group_trades_status_rows(rows)
 
 TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
@@ -1350,6 +1484,90 @@ def _read_alltrades_prices(wb):
     return prices
 
 
+def _prev_cell_dt(v):
+    """A previous report's timestamp cell as the string the sheet displays.
+
+    The script always writes text, but Excel converts a cell the user retypes by
+    hand into a real datetime (shown in their own locale format, e.g.
+    '22-06-2026 18:57'), so those are re-rendered in _DT_FMT — otherwise a
+    manually corrected placement time would never match on the next run."""
+    if isinstance(v, dt.datetime):
+        return v.strftime(_DT_FMT)
+    if isinstance(v, dt.date):
+        return v.strftime("%d-%b-%Y")
+    return str(v).strip() if v not in (None, "") else ""
+
+
+def _read_trades_status_placed(wb):
+    """Build {row_key: [order-placed time, …]} from a workbook's 'Trades_Status'
+    sheet, so a placement time established once stays fixed in every later
+    report (see _apply_placed_times).
+
+    Columns are resolved by HEADER NAME (row 2), not position, so the chain
+    survives a column move and both earlier layouts still feed it:
+      • the pre-rename pair, 'Order/Executed Date & Time (GST)'
+      • the single 'Date & Time (GST)' column, whose value was a placement time
+        ONLY on a pending row — on an executed row it was the FILL time, so
+        those are read as fill times instead of mistaken for placements.
+
+    Each row is indexed under both key shapes _lookup_placed tries, so a leg
+    that was pending in the previous report is still found once it has filled.
+    A key holds every candidate found under it, not just the first, so repeated
+    round trips in one contract stay separable by date (see _placed_fits).
+    """
+    placed = defaultdict(list)
+    if "Trades_Status" not in wb.sheetnames:
+        return placed
+    rows = list(wb["Trades_Status"].iter_rows(min_row=2, values_only=True))
+    if not rows:
+        return placed
+    header = [str(c) if c is not None else "" for c in rows[0]]
+
+    def _col(*names):
+        for n in names:
+            if n in header:
+                return header.index(n)
+        return None
+
+    c_placed = _col("Order Placed Date & Time (GST)", "Order Date & Time (GST)")
+    c_exec   = _col("Order Executed Date & Time (GST)",
+                    "Executed Date & Time (GST)")
+    c_single = _col("Date & Time (GST)")
+    c_con, c_act = _col("Contract"), _col("Action")
+    c_typ, c_qty = _col("Type"), _col("Quantity")
+    c_status     = _col("Order_Status")
+    if None in (c_con, c_act, c_typ, c_qty):
+        return placed
+    if c_placed is None and c_single is None:
+        return placed
+
+    for row in rows[1:]:
+        if not row:
+            continue
+        g = lambda i: (row[i] if i is not None and i < len(row) else None)
+        status      = str(g(c_status) or "").strip().lower()
+        placed_at   = _prev_cell_dt(g(c_placed))
+        executed_at = _prev_cell_dt(g(c_exec))
+        if c_placed is None:
+            # Single-column era: that one cell means different things per row.
+            if status == STATUS_PENDING:
+                placed_at = _prev_cell_dt(g(c_single))
+            else:
+                executed_at = executed_at or _prev_cell_dt(g(c_single))
+        if not placed_at:
+            continue
+        con, act, typ, qty = g(c_con), g(c_act), g(c_typ), g(c_qty)
+        keys = [_ts_order_key(con, act, typ, qty)]
+        if executed_at:
+            keys.append(_ts_fill_key(con, act, executed_at))
+        if status == STATUS_PENDING:
+            keys.append(_ts_order_key(con, act, typ, qty, pending=True))
+        for k in keys:
+            if placed_at not in placed[k]:
+                placed[k].append(placed_at)
+    return dict(placed)
+
+
 def load_previous_report():
     """Open the closest prior report (e.g. MIS_04Jun2026.xlsx) and pull forward
     the data the user maintains by hand, which would otherwise be lost because
@@ -1357,16 +1575,19 @@ def load_previous_report():
 
       - manual Trigger/Limit prices from the 'All Trades' sheet, keyed by
         (datetime, contract, action, qty, price) so they re-attach to the same fill
+      - the Order Placed times from the 'Trades_Status' sheet, which live only in
+        the report chain (see _read_trades_status_placed)
       - the running rows of every manually-filled sheet: Strategy Details, Bugs,
         Shubham_Activity and Ajay_Activity
 
-    Returns (manual_prices: dict, carried: {sheet_name: list-of-rows}).
+    Returns (manual_prices: dict, placed_times: dict,
+             carried: {sheet_name: list-of-rows}).
     """
     from openpyxl import load_workbook
 
     reports = _list_previous_reports()
     if not reports:
-        return {}, {}
+        return {}, {}, {}
     prev_path = reports[0]
 
     try:
@@ -1376,39 +1597,52 @@ def load_previous_report():
         wb = load_workbook(prev_path, data_only=True)
     except Exception as e:                                  # noqa: BLE001
         print(f"  [Carry-forward] could not open {prev_path}: {e}", file=sys.stderr)
-        return {}, {}
+        return {}, {}, {}
 
-    # Trigger/limit prices from the most recent report.
+    # Trigger/limit prices and order-placed times from the most recent report.
     manual_prices = _read_alltrades_prices(wb)
+    placed_times  = _read_trades_status_placed(wb)
 
     # Manual sheets copied verbatim (headers + every data row, no blanks).
     carried = {name: _read_manual_sheet(wb, name) for name in _VERBATIM_SHEETS}
 
     wb.close()
 
-    # Self-heal: if the latest report carries no trigger/limit prices at all
-    # (e.g. a column-layout change once broke the chain), fall back to the most
-    # recent older report that still has them so the prices aren't lost.
-    if not manual_prices:
+    # Self-heal: if the latest report carries no trigger/limit prices or no
+    # order-placed times at all (e.g. a column-layout change once broke a
+    # chain), fall back to the most recent older report that still has them so
+    # neither is lost. Each is recovered independently — the Trades_Status sheet
+    # is newer than the All Trades one, so the last report to carry either is
+    # not necessarily the same file.
+    if not manual_prices or not placed_times:
         for older in reports[1:]:
             try:
                 w2 = load_workbook(older, read_only=True, data_only=True)
             except Exception:                              # noqa: BLE001
                 continue
-            mp = _read_alltrades_prices(w2)
+            if not manual_prices:
+                mp = _read_alltrades_prices(w2)
+                if mp:
+                    manual_prices = mp
+                    print(f"  [Carry-forward] recovered {len(mp)} trigger/limit "
+                          f"price(s) from {os.path.basename(older)}.")
+            if not placed_times:
+                pt = _read_trades_status_placed(w2)
+                if pt:
+                    placed_times = pt
+                    print(f"  [Carry-forward] recovered {len(pt)} order-placed "
+                          f"time(s) from {os.path.basename(older)}.")
             w2.close()
-            if mp:
-                manual_prices = mp
-                print(f"  [Carry-forward] recovered {len(mp)} trigger/limit "
-                      f"price(s) from {os.path.basename(older)}.")
+            if manual_prices and placed_times:
                 break
     def _n_rows(v):
         # Verbatim sheets store (headers, rows); data-only sheets store rows.
         return len(v[1]) if isinstance(v, tuple) else len(v)
     counts = ", ".join(f"{_n_rows(v)} {k}" for k, v in carried.items())
     print(f"  [Carry-forward] {len(manual_prices)} trigger/limit price(s); "
+          f"{len(placed_times)} order-placed key(s); "
           f"{counts} from {os.path.basename(prev_path)}.")
-    return manual_prices, carried
+    return manual_prices, placed_times, carried
 
 
 # ----------------------------------------------------------------------
@@ -2427,9 +2661,9 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     agg_7     = aggregate(rows_7)
     agg_all   = aggregate(rows)             # all trades returned by IBKR
 
-    # Carry forward what the user maintains by hand in the previous report:
-    # trigger/limit prices (All Trades) and every manual sheet's rows.
-    manual_prices, carried = load_previous_report()
+    # Carry forward from the previous report: trigger/limit prices (All Trades),
+    # the Trades_Status order-placed times, and every manual sheet's rows.
+    manual_prices, placed_times, carried = load_previous_report()
 
     # All Trades: every individual trade IBKR returns (ledger trigger/limit,
     # with manually-entered prices from the previous report taking precedence).
@@ -2494,11 +2728,14 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     # Pending Order sheet uses — Trades_Status must show a still-working leg even
     # when its asset already has an open position (see build_trades_status_rows).
     trades_status_rows = build_trades_status_rows(orders_by_symbol, completed_orders,
-                                                  all_trade_rows, fx_rates, ledger)
+                                                  all_trade_rows, fx_rates, ledger,
+                                                  placed_times)
     _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
     n_groups = len({r[TS_COL_CONTRACT] for r in trades_status_rows})
+    n_placed = sum(1 for r in trades_status_rows if r[TS_COL_PLACED])
     print(f"  [Trades Status] {len(trades_status_rows)} row(s) "
-          f"(pending + cancelled + filled) in {n_groups} asset group(s).")
+          f"(pending + cancelled + filled) in {n_groups} asset group(s); "
+          f"{n_placed} with an order-placed time.")
     _fill_running_positions_sheet(wb.create_sheet(),  rows, live_positions, flex_positions,
                                   fx_rates)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
