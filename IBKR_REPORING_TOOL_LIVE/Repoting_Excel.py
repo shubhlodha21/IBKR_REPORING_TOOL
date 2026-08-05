@@ -24,7 +24,7 @@ import time
 import threading
 import datetime as dt
 import xml.etree.ElementTree as ET
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 
 import requests
 from openpyxl import Workbook
@@ -877,8 +877,11 @@ def _group_trades_status_rows(rows):
     _ts_row_moment). Groups themselves are ordered by their earliest activity,
     so the sheet reads oldest-first too.
 
-    Sr No is then a plain running count (1,2,3,4,…) over every row, so it stays
-    a usable line number once the blocks are in place.
+    Sr No is left entirely to the shared position numbering (see
+    assign_shared_numbering) so the same leg carries the same number here, on
+    All Trades and on Pending Order. A row that belongs to no position — a
+    cancelled or rejected order, which never moved any quantity — keeps a blank
+    Sr No rather than a running count that would collide with a real one.
     """
     groups = defaultdict(list)
     for r in rows:
@@ -894,8 +897,6 @@ def _group_trades_status_rows(rows):
     out = []
     for _, _, grp in ordered_groups:
         out.extend(grp)
-    for sr, r in enumerate(out, start=1):
-        r[TS_COL_SR] = sr
     return out
 
 
@@ -1130,7 +1131,7 @@ TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", 
 TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 12, 14, 12, 14, 10, 12, 14, 14, 14]
 # Column indexes into an All Trades row (0-based), used by the carry-forward
 # merge that freezes a fill once a report has published it.
-AT_COL_DT_UTC, AT_COL_SR = 0, 2
+AT_COL_DT_UTC, AT_COL_DT_GST, AT_COL_SR = 0, 1, 2
 AT_COL_CONTRACT, AT_COL_ACTION = 3, 5
 AT_COL_QTY, AT_COL_PRICE = 6, 7
 AT_COL_COMMISSION, AT_COL_PNL = 14, 15
@@ -1635,6 +1636,29 @@ def _trade_row_key(row):
             _num(row[AT_COL_QTY], 0), _num(row[AT_COL_PRICE], 4))
 
 
+def _trade_fill_identity(row):
+    """What makes an All Trades row the same FILL as another, ignoring the
+    timestamp: trade date, contract, side, quantity and price.
+
+    IBKR reports one fill twice, differently. The live execution feed times it
+    to its own clock and names the venue IDEALPRO; the Flex batch, a day later,
+    carries its own timestamp and calls the same venue IDEALFX. Keyed on the
+    exact timestamp the two look like separate trades, which is how the same
+    30-Jul USD.JPY sell was published twice — once with a blank Order Type and
+    once as STP/162.4300. This is the same identity merge_todays_executions
+    dedups on, so both paths agree on what "already have it" means."""
+    def _num(v, dp):
+        try:
+            return f"{abs(float(str(v).replace(',', ''))):.{dp}f}"
+        except (TypeError, ValueError):
+            return str(v or "").strip().upper()
+    moment = _ts_moment(row[AT_COL_DT_UTC])
+    return (moment.date() if moment else str(row[AT_COL_DT_UTC] or "").strip(),
+            str(row[AT_COL_CONTRACT] or "").strip().upper(),
+            str(row[AT_COL_ACTION] or "").strip().upper()[:1],
+            _num(row[AT_COL_QTY], 0), _num(row[AT_COL_PRICE], 4))
+
+
 def _merge_prev_trade_rows(new_rows, prev_rows):
     """All Trades: keep every row the previous report had, exactly as it had it.
 
@@ -1645,6 +1669,14 @@ def _merge_prev_trade_rows(new_rows, prev_rows):
     window has a horizon, and reqExecutions only covers today — are kept instead
     of silently vanishing. Genuinely new fills are added.
 
+    A previous row is only carried when today's rows do not already ACCOUNT for
+    that fill, counted on _trade_fill_identity rather than on the timestamp. The
+    same fill reported by the live feed and later by Flex carries two different
+    timestamps, so without counting it would be carried alongside its own
+    replacement and published twice. Counting rather than simply skipping keeps
+    two genuinely separate fills of identical size and price on one day — each
+    has its own IBKR execId and both belong in the sheet.
+
     Rows are re-sorted newest-first and Sr No renumbered, so the sheet still
     reads the way it always did once carried and fresh rows are interleaved.
     """
@@ -1653,6 +1685,10 @@ def _merge_prev_trade_rows(new_rows, prev_rows):
     prev_by_key = {}
     for r in prev_rows:
         prev_by_key.setdefault(_trade_row_key(r), r)
+
+    # How many rows today's fetch already has for each fill identity; a carried
+    # row may only fill a shortfall against that count.
+    covered = Counter(_trade_fill_identity(r) for r in new_rows)
 
     out, seen, carried, frozen = [], set(), 0, 0
     for r in new_rows:
@@ -1664,9 +1700,14 @@ def _merge_prev_trade_rows(new_rows, prev_rows):
         else:
             out.append(r)
     for k, r in prev_by_key.items():
-        if k not in seen:
-            out.append(list(r))
-            carried += 1
+        if k in seen:
+            continue
+        ident = _trade_fill_identity(r)
+        if covered[ident] > 0:
+            covered[ident] -= 1      # today's row IS this fill, reported anew
+            continue
+        out.append(list(r))
+        carried += 1
 
     out.sort(key=lambda r: (_ts_moment(r[AT_COL_DT_UTC]) or dt.datetime.min),
              reverse=True)
@@ -1676,6 +1717,99 @@ def _merge_prev_trade_rows(new_rows, prev_rows):
           f"report had them, {carried} carried that IBKR no longer returns, "
           f"{len(out) - frozen - carried} new.")
     return out
+
+
+def _fill_moment(row):
+    """When an All Trades row happened, for ordering a position's legs."""
+    return _ts_moment(row[AT_COL_DT_UTC]) or dt.datetime.min
+
+
+def assign_shared_numbering(all_trade_rows, orders_by_symbol=None, ledger=None):
+    """Number every leg of a position the same way on every sheet.
+
+    A position is one round trip in a contract: its fills in time order, from
+    the one that opens it (net quantity leaves zero) to the one that flattens it
+    again. The opening leg is numbered 1, each leg that follows is 1.1, 1.2 …,
+    and the next position is 2, 2.1, and so on. Positions are numbered in the
+    order they were OPENED, across all contracts, so the numbering reads
+    chronologically no matter which sheet it is seen on.
+
+    A still-working order joins the position it protects — the live stop sitting
+    on an open entry is that position's next leg — and only starts a new number
+    when its contract is flat.
+
+    Returns (fill_numbers, leg_numbers), keyed so that each sheet can look up
+    the number for a row it is about to write:
+      fill_numbers : _ts_fill_key(contract, action, GST time)  -> "2.1"
+      leg_numbers  : _ts_order_key(contract, action, type, qty) -> "3"
+    All Trades rows are numbered in place as a side effect, since the keys are
+    built from those same rows.
+    """
+    by_contract = defaultdict(list)
+    for r in all_trade_rows:
+        by_contract[str(r[AT_COL_CONTRACT] or "").strip().upper()].append(r)
+
+    trips, open_trip = [], {}
+    for contract, rows in by_contract.items():
+        rows.sort(key=_fill_moment)
+        net, cur = 0.0, None
+        for r in rows:
+            if cur is None:
+                cur = {"opened": _fill_moment(r), "contract": contract,
+                       "rows": [], "legs": []}
+                trips.append(cur)
+            cur["rows"].append(r)
+            qty  = abs(_flt(r[AT_COL_QTY]))
+            side = str(r[AT_COL_ACTION] or "").strip().upper()[:1]
+            net += qty if side == "B" else -qty
+            if abs(net) < 1e-9:          # flat again — the position is closed
+                cur = None
+        open_trip[contract] = cur
+
+    # Working legs join the open position, or open one of their own.
+    for symbol, legs in (orders_by_symbol or {}).items():
+        contract = str(symbol).strip().upper()
+        live = [o for o in legs if _is_working_order(o)]
+        if not live:
+            continue
+        # Parents before children, so an entry is numbered before its stop.
+        live.sort(key=lambda o: (bool(o.get("parentId")), o.get("orderId") or 0))
+        cur = open_trip.get(contract)
+        if cur is None:
+            placed = min((_ts_moment(ledger_placed_at(ledger, o.get("orderId"),
+                                                      o.get("permId")))
+                          or dt.datetime.max) for o in live)
+            cur = {"opened": placed, "contract": contract, "rows": [], "legs": []}
+            trips.append(cur)
+            open_trip[contract] = cur
+        cur["legs"].extend(live)
+
+    trips.sort(key=lambda t: (t["opened"], t["contract"]))
+    fill_numbers, leg_numbers = {}, {}
+    for n, trip in enumerate(trips, start=1):
+        seq = 0
+        def _label():
+            return str(n) if seq == 0 else f"{n}.{seq}"
+        for r in trip["rows"]:
+            label = _label(); seq += 1
+            r[AT_COL_SR] = label
+            fill_numbers[_ts_fill_key(r[AT_COL_CONTRACT], r[AT_COL_ACTION],
+                                      r[AT_COL_DT_GST])] = label
+        for o in trip["legs"]:
+            label = _label(); seq += 1
+            leg_numbers.setdefault(_ts_order_key(trip["contract"], o.get("action"),
+                                                 o.get("orderType"),
+                                                 o.get("quantity")), label)
+    return fill_numbers, leg_numbers
+
+
+def _apply_numbering(rows, col, key_fn, numbers):
+    """Write the shared number into `col` of each row that has one."""
+    for r in rows:
+        label = numbers.get(key_fn(r))
+        if label is not None:
+            r[col] = label
+    return rows
 
 
 def _trade_record_key(r):
@@ -3026,6 +3160,17 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     # Dashboard another.
     _apply_frozen_trade_values(rows, all_trade_rows)
 
+    # One position numbering for the whole report — 1 for a position's opening
+    # leg, 1.1/1.2 for the legs that follow, 2 for the next position. Computed
+    # once, off the final All Trades rows, then applied to Pending Order and
+    # Trades_Status so the same leg carries the same number on every sheet.
+    fill_numbers, leg_numbers = assign_shared_numbering(all_trade_rows,
+                                                        orders_by_symbol, ledger)
+    _apply_numbering(pending_rows, 0,
+                     lambda r: _ts_order_key(r[1], r[3], r[4], r[9]), leg_numbers)
+    print(f"  [Numbering] {len(set(fill_numbers.values()) | set(leg_numbers.values()))} "
+          f"leg number(s) shared across All Trades, Trades_Status and Pending Order.")
+
     agg_today = aggregate(rows_today)
     agg_7     = aggregate(rows_7)
     agg_all   = aggregate(rows)             # all trades returned by IBKR
@@ -3094,6 +3239,16 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data,
     # and keep any it had that are no longer reported; pending rows stay live.
     trades_status_rows = _merge_prev_status_rows(trades_status_rows,
                                                 prev_status_rows)
+    # Same numbers as All Trades and Pending Order: an executed row is keyed by
+    # its own fill, a pending one by the shape of the order still working.
+    _apply_numbering(trades_status_rows, TS_COL_SR,
+                     lambda r: _ts_fill_key(r[TS_COL_CONTRACT], r[TS_COL_ACTION],
+                                            r[TS_COL_EXECUTED]), fill_numbers)
+    _apply_numbering(trades_status_rows, TS_COL_SR,
+                     lambda r: (_ts_order_key(r[TS_COL_CONTRACT], r[TS_COL_ACTION],
+                                              r[TS_COL_TYPE], r[TS_COL_QTY])
+                                if str(r[TS_COL_STATUS]).strip().lower() == STATUS_PENDING
+                                else None), leg_numbers)
     _fill_trades_status_sheet(wb.create_sheet(),      trades_status_rows)
     n_groups = len({r[TS_COL_CONTRACT] for r in trades_status_rows})
     n_placed = sum(1 for r in trades_status_rows if r[TS_COL_PLACED])
