@@ -1,0 +1,8 @@
+WINDOWS (PowerShell)
+--------------------
+.\run.ps1
+
+
+UBUNTU / MAC (Terminal)
+------------------------
+bash run.sh

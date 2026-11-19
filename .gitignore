@@ -1,0 +1,23 @@
+# secrets
+.env
+*.env
+.env.*
+!.env.example
+SS.env.zip
+*.pem
+*.key
+
+# python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# editor / temp
+*.save
+*.swp
+*~
+
+# logs
+logs/
+*.log
