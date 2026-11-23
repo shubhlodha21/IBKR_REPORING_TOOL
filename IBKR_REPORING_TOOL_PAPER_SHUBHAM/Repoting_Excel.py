@@ -1339,7 +1339,9 @@ def aggregate(trade_rows, portfolio=None):
         money      = abs(_flt(r.get("tradeMoney", 0))) or qty * price
         # IBKR Flex uses 'ibCommission'; the TWS API uses 'commission'.
         commission = _flt(r.get("ibCommission") or r.get("commission") or 0)
-        pnl        = _row_realized_pnl(r)
+        # Rounded per fill exactly as shown on All Trades, so every sheet adds up
+        # to the same total.
+        pnl        = round(_row_realized_pnl(r), 2)
         exchange   = r.get("exchange", "")
 
         c = data[symbol]
