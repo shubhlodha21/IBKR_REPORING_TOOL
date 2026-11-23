@@ -708,6 +708,15 @@ def _fmt_price(v):
     return f"{v:.2f}" if v is not None else ""
 
 
+# SL % shown on every BUY row of Pending Order and All Trades Detail.
+BUY_SL_PCT = "0.25%"
+
+
+def _sl_cell(action, computed=""):
+    """SL % cell: the fixed BUY_SL_PCT on BUY rows, else the computed value."""
+    return BUY_SL_PCT if str(action).upper() == "BUY" else computed
+
+
 def _sl_pct(entry_trigger, sl_trigger):
     if entry_trigger and sl_trigger:
         return f"{abs(entry_trigger - sl_trigger) / entry_trigger * 100:.2f}%"
@@ -755,7 +764,8 @@ def build_pending_rows(orders_by_symbol):
                 sr, symbol, "", entry["action"], entry["orderType"],
                 _fmt_price(entry["trigger"]), _fmt_price(entry["limit"]),
                 _offset(entry["trigger"], entry["limit"]),
-                _sl_pct(entry["trigger"] or entry["limit"], stop["trigger"] if stop else None),
+                _sl_cell(entry["action"], _sl_pct(entry["trigger"] or entry["limit"],
+                                                  stop["trigger"] if stop else None)),
                 entry["quantity"],
                 _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
             ])
@@ -765,7 +775,7 @@ def build_pending_rows(orders_by_symbol):
                     "", symbol, "", c["action"], c["orderType"],
                     _fmt_price(c["trigger"]), _fmt_price(c["limit"]),
                     _offset(c["trigger"], c["limit"]),
-                    "", c["quantity"], "",
+                    _sl_cell(c["action"]), c["quantity"], "",
                 ])
 
         # Children whose entry already filled (open position): one row each.
@@ -777,7 +787,7 @@ def build_pending_rows(orders_by_symbol):
                 sr, symbol, "", c["action"], c["orderType"],
                 _fmt_price(c["trigger"]), _fmt_price(c["limit"]),
                 _offset(c["trigger"], c["limit"]),
-                "", c["quantity"],
+                _sl_cell(c["action"]), c["quantity"],
                 _total_amount(c["quantity"], c["trigger"], c["limit"]),
             ])
     return rows
@@ -1009,46 +1019,11 @@ def build_detail_trade_rows(trade_rows, order_lookup=None, manual_prices=None):
             f["dt"], f["dt_gst"], sr, f["symbol"], f["name"], f["action"],
             f["qty"], f["price"],
             r.get("orderType") or (rec or {}).get("orderType", ""),
-            f["trigger"], offset, f["limit"], sl, f["exchange"],
+            f["trigger"], offset, f["limit"], _sl_cell(f["action"], sl), f["exchange"],
             f["commission"], f["realized"], f["unrealized"], f["account"],
         ])
     out.reverse()                                   # newest first
     return out
-
-
-# ----------------------------------------------------------------------
-# Order_Status: every order seen on this run (open + today's completed).
-# ----------------------------------------------------------------------
-ORDER_STATUS_HEADERS = ["Sr No", "Contract", "Action", "Order Type", "Trigger", "Limit",
-                        "Quantity", "Filled", "Status", "Completed Time",
-                        "Order ID", "Parent ID", "Account"]
-ORDER_STATUS_WIDTHS  = [7, 12, 8, 11, 11, 11, 10, 9, 13, 26, 12, 12, 13]
-
-
-def build_order_status_rows(orders_by_symbol, completed_orders):
-    orders = {}
-    for sym, legs in orders_by_symbol.items():
-        for o in legs:
-            key = o.get("permId") or f"open-{sym}-{o.get('orderId')}"
-            orders[key] = dict(o, symbol=sym)
-    for o in completed_orders:                      # final status wins
-        orders[o.get("permId") or o.get("orderId")] = dict(o)
-
-    def _sort(o):
-        grp = o.get("parentPermId") or o.get("permId") or 0
-        return (o.get("symbol") or "", str(grp), 1 if o.get("parentPermId") else 0,
-                str(o.get("permId") or ""))
-
-    rows = []
-    for sr, o in enumerate(sorted(orders.values(), key=_sort), start=1):
-        rows.append([
-            sr, o.get("symbol", ""), o.get("action", ""), o.get("orderType", ""),
-            _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
-            o.get("quantity", ""), "" if o.get("filled") is None else o.get("filled"),
-            o.get("status", ""), o.get("time", ""),
-            o.get("permId") or "", o.get("parentPermId") or "", o.get("account", ""),
-        ])
-    return rows
 
 
 def build_today_rows_from_flex(trade_rows):
@@ -1605,7 +1580,6 @@ def _sheet_titles():
     return {
         "Dashboard":     "ACCOUNT DASHBOARD",
         "Pending Order": "PENDING ORDERS",
-        "Order_Status":  "ORDER STATUS  (Orders seen on this run)",
         "All Trades":    f"ALL TRADES  (From {frm})",
         "All Trades Detail": f"ALL TRADES DETAIL  (From {frm})",
         "Open Position": f"OPEN POSITIONS  (From {frm}, live P&L)",
@@ -1655,7 +1629,7 @@ def _apply_autofilter(ws, n_cols, header_row=2):
 
 
 def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup=None,
-                order_status_rows=None, portfolio=None):
+                portfolio=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
@@ -1703,18 +1677,16 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     detail_rows = build_detail_trade_rows(rows, order_lookup=order_lookup,
                                           manual_prices=manual_prices)
 
-    # Sheet sequence: Index, Dashboard, Pending Order, Order_Status, Open Position,
+    # Sheet sequence: Index, Dashboard, Pending Order, Open Position,
     # All Trades, All Trades Detail, Trade Summary.
     wb = Workbook()
     _fill_index_sheet(wb.active,
-                      ["Dashboard", "Pending Order", "Order_Status", "Open Position",
+                      ["Dashboard", "Pending Order", "Open Position",
                        "All Trades", "All Trades Detail", "Trade Summary"],
                       account_id)
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows), portfolio)
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
-    _fill_table_sheet(wb.create_sheet(), "Order_Status", ORDER_STATUS_HEADERS,
-                      ORDER_STATUS_WIDTHS, order_status_rows or [])
     _fill_running_positions_sheet(wb.create_sheet(),  rows, portfolio)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_table_sheet(wb.create_sheet(), "All Trades Detail", DETAIL_HEADERS,
@@ -1971,7 +1943,7 @@ def _fill_trade_list_sheet(ws, sheet_key, rows):
     ws.freeze_panes = "A3"
 
 
-# ── Generic table sheet (Order_Status, All Trades Detail) ─────────────
+# ── Generic table sheet (All Trades Detail) ───────────────────────────
 def _fill_table_sheet(ws, key, headers, widths, rows, amount_cols=(), color_cols=()):
     ws.title = _tab(key)
     n_cols   = len(headers)
@@ -2157,7 +2129,6 @@ def main():
 
     link_parent_orders(orders_by_symbol)
     pending_rows = build_pending_rows(orders_by_symbol)
-    order_status_rows = build_order_status_rows(orders_by_symbol, completed_orders)
     print(f"  Live: {len(pending_rows)} pending order rows | {len(executions)} fill(s) today | "
           f"{len(completed_orders)} completed order(s) | {len(account_data)} account tag(s).")
     print(f"  Flex: {len(flex_mine)} of {len(flex_rows)} trade record(s) belong to {ACCOUNT}.")
@@ -2225,7 +2196,7 @@ def main():
     if not rows:
         print("No trades stored yet for this account.")
     write_excel(rows, pending_rows, [], ACCOUNT, account_data, order_lookup,
-                order_status_rows=order_status_rows, portfolio=portfolio)
+                portfolio=portfolio)
 
     log_run("WARN" if warnings else "OK",
             fills_stored=len(store), live_today=len(executions), flex_rows=len(flex_mine),
