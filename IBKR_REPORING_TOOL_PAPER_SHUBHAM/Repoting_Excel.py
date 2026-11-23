@@ -95,6 +95,14 @@ EXEC_WAIT  = 15          # seconds to wait for executions (0.5 s timer + fills +
 _UNSET = (0, 1.7976931348623157e308)
 
 
+def _sym_key(contract):
+    """Symbol as the Flex statement writes it: FX pairs by their pair name
+    (e.g. EUR.USD), everything else by its symbol."""
+    if getattr(contract, "secType", "") == "CASH" and getattr(contract, "localSymbol", ""):
+        return contract.localSymbol
+    return contract.symbol
+
+
 def _qty(v):
     """Quantity from the TWS API (float / Decimal / unset) as a plain number."""
     try:
@@ -161,6 +169,9 @@ class IBOrderApp(EWrapper, EClient):
         self.completed_orders = []          # today's filled/cancelled orders
         self.managed_accounts = []          # accounts on this Gateway login
         self.order_status     = {}          # permId -> (status, filled qty, avg fill price)
+        self.portfolio        = {}          # symbol -> live position / price / P&L
+        self.portfolio_account = None
+        self._portfolio_done  = threading.Event()
         self._orders_done     = threading.Event()
         self._acct_done       = threading.Event()
         self._exec_done       = threading.Event()
@@ -187,6 +198,13 @@ class IBOrderApp(EWrapper, EClient):
         # don't congest the message loop, and set a 24-hour window so
         # pre-market fills and all intraday trades are captured.
         threading.Timer(0.5, self._req_executions).start()
+        # Open positions with IB's current market price and unrealized P&L.
+        acct = ACCOUNT or (self.managed_accounts[0] if len(self.managed_accounts) == 1 else None)
+        if acct:
+            self.portfolio_account = acct
+            self.reqAccountUpdates(True, acct)
+        else:
+            self._portfolio_done.set()
 
     def _req_executions(self):
         # Empty filter → ALL of the current trading day's executions.
@@ -207,7 +225,7 @@ class IBOrderApp(EWrapper, EClient):
             "orderId":   f"C{oid}",
             "permId":    getattr(order, "permId", 0) or None,
             "account":   getattr(order, "account", "") or "",
-            "symbol":    contract.symbol,
+            "symbol":    _sym_key(contract),
             "action":    order.action,
             "orderType": order.orderType,
             "trigger":   trigger,
@@ -228,7 +246,7 @@ class IBOrderApp(EWrapper, EClient):
         trigger = order.auxPrice if order.auxPrice not in _UNSET else None
         limit   = order.lmtPrice if order.lmtPrice not in _UNSET else None
         perm    = getattr(order, "permId", 0) or None
-        legs    = self.orders_by_symbol[contract.symbol]
+        legs    = self.orders_by_symbol[_sym_key(contract)]
         # TWS can send openOrder several times for one order (status updates);
         # keep only the latest copy.
         if perm:
@@ -270,7 +288,7 @@ class IBOrderApp(EWrapper, EClient):
             "account":    execution.acctNumber,
             "permId":     getattr(execution, "permId", 0) or None,   # links fill -> order
             "conId":      getattr(contract, "conId", 0) or None,
-            "contract":   contract.symbol,
+            "contract":   _sym_key(contract),
             "action":     "BUY" if execution.side in ("BOT", "BUY") else "SELL",
             "quantity":   execution.shares,
             "price":      execution.price,
@@ -289,6 +307,25 @@ class IBOrderApp(EWrapper, EClient):
         print(f"[TWS] execDetailsEnd - {len(self.executions)} execution(s) received so far.")
         self._exec_done.set()
 
+    # ── portfolio (open positions) ────────────────────────────────────
+    def updatePortfolio(self, contract, position, marketPrice, marketValue,
+                        averageCost, unrealizedPNL, realizedPNL, accountName):
+        pos = _qty(position) or 0
+        if not pos:
+            return
+        self.portfolio[_sym_key(contract)] = {
+            "account":     accountName,
+            "position":    pos,
+            "marketPrice": marketPrice,
+            "marketValue": marketValue,
+            "averageCost": averageCost,
+            "unrealized":  unrealizedPNL,
+        }
+
+    def accountDownloadEnd(self, accountName):
+        print(f"[TWS] accountDownloadEnd - {len(self.portfolio)} open position(s).")
+        self._portfolio_done.set()
+
 
 def fetch_tws_data():
     """Connect to TWS once and fetch open orders, account summary, today's
@@ -299,7 +336,7 @@ def fetch_tws_data():
     except Exception as e:
         print(f"[TWS] Could not connect ({e}) - live sheets will be empty.",
               file=sys.stderr)
-        return {}, {}, {}, [], []
+        return {}, {}, {}, [], [], None
     threading.Thread(target=app.run, daemon=True).start()
     # Each feed has its own generous timeout so a slow/missing feed
     # doesn't block the others.
@@ -307,9 +344,15 @@ def fetch_tws_data():
     app._acct_done.wait(timeout=ACCT_WAIT)
     app._exec_done.wait(timeout=EXEC_WAIT)
     app._completed_done.wait(timeout=EXEC_WAIT)
+    got_portfolio = app._portfolio_done.wait(timeout=ACCT_WAIT)
     # Commission reports arrive asynchronously after execDetailsEnd;
     # give TWS extra time to push them all through before we disconnect.
     time.sleep(1.5)
+    if app.portfolio_account:
+        try:
+            app.reqAccountUpdates(False, app.portfolio_account)
+        except Exception:                                   # noqa: BLE001
+            pass
     app.disconnect()
     # Attach the latest status / filled quantity to each open order.
     for legs in app.orders_by_symbol.values():
@@ -318,8 +361,10 @@ def fetch_tws_data():
             if st:
                 o["status"] = st[0] or o.get("status", "")
                 o["filled"] = st[1]
+    # None = portfolio not received (Gateway down) -> Unrealized P&L left blank.
+    portfolio = app.portfolio if (got_portfolio and app.portfolio_account) else None
     return (app.orders_by_symbol, app.account_data, app.executions,
-            app.completed_orders, app.managed_accounts)
+            app.completed_orders, app.managed_accounts, portfolio)
 
 
 # ----------------------------------------------------------------------
@@ -739,20 +784,38 @@ def build_pending_rows(orders_by_symbol):
 
 
 PENDING_HEADERS = ["Sr No", "Contract", "Name", "Action", "Type",
-                   "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount"]
-PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14]
+                   "Trigger", "Limit", "Offset", "SL-Percentage", "Quantity", "Total Amount",
+                   "Realized P&L", "Unrealized P&L"]
+PENDING_WIDTHS  = [7, 12, 30, 9, 10, 10, 10, 10, 15, 10, 14, 14, 15]
+
+
+def add_pnl_to_pending(pending_rows, agg_rows, portfolio):
+    """Append the contract's Realized P&L (report window) and Unrealized P&L
+    (live open position) to each numbered Pending Order row."""
+    realized = {r["Contract"]: r["Realized P&L"] for r in agg_rows}
+    out = []
+    for row in pending_rows:
+        if row[0] == "":
+            out.append(row + ["", ""])
+            continue
+        sym = row[1]
+        unreal = ("" if portfolio is None else
+                  round(_flt((portfolio.get(sym) or {}).get("unrealized")), 2))
+        out.append(row + [realized.get(sym, 0.0), unreal])
+    return out
 
 TODAY_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
                  "Action", "Quantity", "Price", "Trigger Price", "Limit Price",
-                 "Exchange", "Order Type", "Commission", "Realized PnL", "Account"]
-TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 14, 14, 12, 12, 14, 14, 14]
+                 "Exchange", "Order Type", "Commission", "Realized P&L", "Unrealized P&L",
+                 "Account"]
+TODAY_WIDTHS  = [22, 22, 7, 14, 30, 10, 12, 14, 14, 14, 12, 12, 14, 14, 15, 14]
 
 # Gulf Standard Time (Dubai) is UTC+4 — used for the second All Trades time column.
 _GST_OFFSET_HOURS = 4
 
 # Columns whose numeric cells get green (positive) / red (negative) shading.
 # Commission is intentionally excluded — it is shown with no colour.
-COLOR_COLUMNS_TRADES = ["Realized PnL"]
+COLOR_COLUMNS_TRADES = ["Realized P&L", "Unrealized P&L"]
 
 
 def _parse_exec_time(raw):
@@ -825,6 +888,7 @@ def build_individual_trade_rows(trade_rows, date_filter=None, order_lookup=None,
             r.get("orderType", ""),
             f["commission"],
             f["realized"],
+            f["unrealized"],
             f["account"],
         ])
     return rows
@@ -894,6 +958,8 @@ def _fill_fields(r, order_lookup=None, manual_prices=None):
         "exchange": r.get("exchange", ""),
         "commission": _amt(r.get("ibCommission") or r.get("commission")),
         "realized": _amt(_row_realized_pnl(r), signed=True),
+        "unrealized": ("" if r.get("_unrealized") is None
+                       else _amt(r.get("_unrealized"), signed=True)),
         "account": r.get("accountId") or r.get("acctId") or r.get("account") or "",
     }
 
@@ -904,8 +970,9 @@ def _fill_fields(r, order_lookup=None, manual_prices=None):
 # ----------------------------------------------------------------------
 DETAIL_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
                   "Action", "Quantity", "Price", "Order Type", "Trigger Price", "Offset",
-                  "Limit Price", "SL %", "Exchange", "Commission", "Realized", "Account"]
-DETAIL_WIDTHS  = [20, 20, 8, 12, 28, 8, 10, 12, 11, 12, 9, 12, 9, 12, 12, 12, 13]
+                  "Limit Price", "SL %", "Exchange", "Commission", "Realized P&L",
+                  "Unrealized P&L", "Account"]
+DETAIL_WIDTHS  = [20, 20, 8, 12, 28, 8, 10, 12, 11, 12, 9, 12, 9, 12, 12, 13, 15, 13]
 
 
 def build_detail_trade_rows(trade_rows, order_lookup=None, manual_prices=None):
@@ -943,7 +1010,7 @@ def build_detail_trade_rows(trade_rows, order_lookup=None, manual_prices=None):
             f["qty"], f["price"],
             r.get("orderType") or (rec or {}).get("orderType", ""),
             f["trigger"], offset, f["limit"], sl, f["exchange"],
-            f["commission"], f["realized"], f["account"],
+            f["commission"], f["realized"], f["unrealized"], f["account"],
         ])
     out.reverse()                                   # newest first
     return out
@@ -1264,16 +1331,16 @@ HEADERS = [
     "Total (bought)", "Total (sold)",
     "Exchange List",
     "Commission",
-    "PnL", "Unrealized PnL",
+    "Realized P&L", "Unrealized P&L",
 ]
 
 # Trade Summary columns shaded green (positive) / red (negative).
 # Commission is intentionally excluded — it is shown with no colour.
-COLOR_COLUMNS_SUMMARY = ["PnL", "Unrealized PnL"]
+COLOR_COLUMNS_SUMMARY = ["Realized P&L", "Unrealized P&L"]
 
 # Money columns formatted as 1,234.00 on the aggregate sheets.
 AMOUNT_COLUMNS_SUMMARY = ["Avg (bought)", "Avg (sold)", "Total (bought)",
-                          "Total (sold)", "Commission", "PnL", "Unrealized PnL"]
+                          "Total (sold)", "Commission", "Realized P&L", "Unrealized P&L"]
 
 
 def _flt(val):
@@ -1292,7 +1359,10 @@ def _fmt_limit(val):
         return str(val)
 
 
-def aggregate(trade_rows):
+def aggregate(trade_rows, portfolio=None):
+    """Per-contract summary. Realized P&L sums the given fills; Unrealized P&L
+    is IB's live figure for the contract's open position (0 when flat, blank
+    when the Gateway gave no portfolio)."""
     data = defaultdict(lambda: {
         "buy_qty": 0.0, "sell_qty": 0.0,
         "buy_value": 0.0, "sell_value": 0.0,
@@ -1312,7 +1382,6 @@ def aggregate(trade_rows):
         # IBKR Flex uses 'ibCommission'; the TWS API uses 'commission'.
         commission = _flt(r.get("ibCommission") or r.get("commission") or 0)
         pnl        = _row_realized_pnl(r)
-        unrealized = _flt(r.get("mtmPnl", 0)) or _flt(r.get("unrealizedPnl", 0))
         exchange   = r.get("exchange", "")
 
         c = data[symbol]
@@ -1324,7 +1393,6 @@ def aggregate(trade_rows):
             c["sell_value"] += money
         c["commission"] += commission
         c["pnl"]        += pnl
-        c["unrealized"] += unrealized
         if exchange:
             c["exchanges"].add(exchange)
         if name and not c["name"]:
@@ -1350,8 +1418,9 @@ def aggregate(trade_rows):
             "Total (sold)":         round(c["sell_value"], 2),
             "Exchange List":        ", ".join(sorted(c["exchanges"])),
             "Commission":           round(c["commission"], 2),
-            "PnL":                  round(c["pnl"], 2),
-            "Unrealized PnL":       round(c["unrealized"], 2),
+            "Realized P&L":         round(c["pnl"], 2),
+            "Unrealized P&L":       ("" if portfolio is None else
+                                     round(_flt((portfolio.get(symbol) or {}).get("unrealized")), 2)),
             "First Trade Date (UTC)": datetimes[0][1]  if datetimes else "",
             "First Trade Date (GST)": _to_gst(datetimes[0][1])  if datetimes else "",
             "Last Trade Date (UTC)":  datetimes[-1][1] if datetimes else "",
@@ -1379,21 +1448,32 @@ def _trade_sort_dt(row):
     return dt.datetime.combine(d, dt.time.min)
 
 
-def compute_realized_pnl(trade_rows):
-    """Calculate FIFO realized P&L for each fill, annotating the trade dict
-    in place under '_calcRealizedPnl'.
+def _fill_cpu_mult(r):
+    """(commission per unit, contract multiplier) for one fill."""
+    qty  = abs(_flt(r.get("quantity", 0)))
+    comm = abs(_flt(r.get("ibCommission") or r.get("commission") or 0))
+    mult = _flt(r.get("multiplier")) or 1.0
+    return (comm / qty if qty else 0.0), mult
 
-    IBKR's Flex 'fifoPnlRealized' field comes back empty on paper accounts, so
-    realized P&L is computed here: each closing fill is matched against earlier
-    opposite-side open lots, first-in-first-out, and the realized amount
-    (close price − open price) × matched qty is assigned to that closing fill.
-    Because the value lands on the closing trade, per-trade figures sum cleanly
-    up into the per-contract Trade Summary and the Dashboard totals. Figures are
-    gross of commissions, which stay in their own column."""
+
+def compute_realized_pnl(trade_rows):
+    """FIFO realized P&L per fill, net of commissions.
+
+    Runs over the FULL stored history (not just the report window) so a
+    position opened before the window start is closed against its real cost.
+    Each closing fill is matched against earlier opposite-side lots, first in
+    first out; realized = price difference x matched qty x multiplier, minus
+    the commission share of both the opening and the closing fill. It is
+    stored on the closing fill as '_calcRealizedPnl'. IBKR's own Flex figure
+    (fifoPnlRealized, also net of commission) is preferred when it is given.
+
+    Also stores '_openQty' on each fill: the part of it that is still open
+    (signed, + long / - short), used for per-fill Unrealized P&L."""
     from collections import deque
 
-    lots_by_symbol = defaultdict(deque)   # symbol -> deque of [qty, price, sign]
+    lots_by_symbol = defaultdict(deque)   # symbol -> [qty, price, sign, cpu, mult, row]
     for r in sorted(trade_rows, key=_trade_sort_dt):
+        r["_openQty"] = 0.0
         symbol = r.get("symbol") or r.get("description") or "UNKNOWN"
         side   = r.get("buySell", "").upper().strip()
         qty    = abs(_flt(r.get("quantity", 0)))
@@ -1403,26 +1483,43 @@ def compute_realized_pnl(trade_rows):
         if qty == 0 or sign == 0:
             r["_calcRealizedPnl"] = 0.0
             continue
+        cpu, mult = _fill_cpu_mult(r)
 
         lots      = lots_by_symbol[symbol]
         realized  = 0.0
         remaining = qty
-        # Close opposite-side open lots first (FIFO).
         while remaining > 1e-9 and lots and lots[0][2] == -sign:
             lot     = lots[0]
             matched = min(remaining, lot[0])
-            if lot[2] == 1:        # closing a long lot with a sell
-                realized += (price - lot[1]) * matched
-            else:                  # closing a short lot with a buy
-                realized += (lot[1] - price) * matched
+            diff    = (price - lot[1]) if lot[2] == 1 else (lot[1] - price)
+            realized += diff * matched * lot[4] - matched * (lot[3] + cpu)
             lot[0]    -= matched
             remaining -= matched
+            lot[5]["_openQty"] = lot[0] * lot[2]
             if lot[0] <= 1e-9:
                 lots.popleft()
-        # Any leftover quantity opens a new lot on this side.
         if remaining > 1e-9:
-            lots.append([remaining, price, sign])
+            lots.append([remaining, price, sign, cpu, mult, r])
+            r["_openQty"] = remaining * sign
         r["_calcRealizedPnl"] = round(realized, 2)
+
+
+def annotate_unrealized(trade_rows, portfolio):
+    """Per-fill Unrealized P&L for the still-open part of each fill, valued at
+    IB's current market price: open qty x (market - fill price) x multiplier,
+    minus that part's commission. Blank when no live price is available."""
+    for r in trade_rows:
+        r["_unrealized"] = None
+        oq = _flt(r.get("_openQty"))
+        if not oq or portfolio is None:
+            continue
+        pos = portfolio.get(r.get("symbol") or "")
+        mkt = _flt(pos.get("marketPrice")) if pos else 0.0
+        if not mkt:
+            continue
+        cpu, mult = _fill_cpu_mult(r)
+        price = abs(_flt(r.get("tradePrice", 0)))
+        r["_unrealized"] = round(oq * (mkt - price) * mult - abs(oq) * cpu, 2)
 
 
 def _row_realized_pnl(row):
@@ -1511,7 +1608,7 @@ def _sheet_titles():
         "Order_Status":  "ORDER STATUS  (Orders seen on this run)",
         "All Trades":    f"ALL TRADES  (From {frm})",
         "All Trades Detail": f"ALL TRADES DETAIL  (From {frm})",
-        "Open Position": f"OPEN POSITIONS  (From {frm})",
+        "Open Position": "OPEN POSITIONS  (Full history, live P&L)",
         "Trade Summary": f"TRADE SUMMARY  (From {frm})",
     }
 
@@ -1558,10 +1655,16 @@ def _apply_autofilter(ws, n_cols, header_row=2):
 
 
 def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup=None,
-                order_status_rows=None):
+                order_status_rows=None, portfolio=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
+
+    # Realized P&L (FIFO) over the FULL history first, so positions opened
+    # before the report window are closed against their real cost.
+    all_rows = rows
+    compute_realized_pnl(all_rows)
+    annotate_unrealized(all_rows, portfolio)
 
     # ── Global cutoff: keep only trades on/after DATA_FROM ──
     rows = [r for r in rows if (parse_trade_date(r) or dt.date.min) >= DATA_FROM]
@@ -1570,7 +1673,6 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     # Calculate FIFO realized P&L per fill (annotates each row in place) so the
     # All Trades, Trade Summary and Dashboard all reflect a computed P&L even
     # when IBKR's Flex feed omits it (e.g. on paper accounts).
-    compute_realized_pnl(rows)
 
     # Today's set mirrors the Today Orders sheet: today's fills, or yesterday's
     # as a fallback when IBKR's Flex batch hasn't published today's yet.
@@ -1586,7 +1688,8 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
 
     agg_today = aggregate(rows_today)
     agg_7     = aggregate(rows_7)
-    agg_all   = aggregate(rows)             # all trades since DATA_FROM
+    agg_all   = aggregate(rows, portfolio)  # all trades since DATA_FROM
+    pending_rows = add_pnl_to_pending(pending_rows, agg_all, portfolio)
 
     # Carry forward the manual trigger/limit prices (All Trades) from the
     # previous report.
@@ -1608,15 +1711,16 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
                        "All Trades", "All Trades Detail", "Trade Summary"],
                       account_id)
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
-                          agg_7, agg_today, agg_all, len(all_trade_rows))
+                          agg_7, agg_today, agg_all, len(all_trade_rows), portfolio)
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
     _fill_table_sheet(wb.create_sheet(), "Order_Status", ORDER_STATUS_HEADERS,
                       ORDER_STATUS_WIDTHS, order_status_rows or [])
-    _fill_running_positions_sheet(wb.create_sheet(),  rows)
+    _fill_running_positions_sheet(wb.create_sheet(),  all_rows, portfolio)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_table_sheet(wb.create_sheet(), "All Trades Detail", DETAIL_HEADERS,
                       DETAIL_WIDTHS, detail_rows,
-                      amount_cols=("Commission", "Realized"), color_cols=("Realized",))
+                      amount_cols=("Commission", "Realized P&L", "Unrealized P&L"),
+                      color_cols=("Realized P&L", "Unrealized P&L"))
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
     os.makedirs(_REPORTS_DIR, exist_ok=True)
     wb.save(OUTPUT_FILE)
@@ -1753,7 +1857,7 @@ def _fill_index_sheet(ws, sheet_titles, account_id="N/A"):
 
 # ── Dashboard sheet ────────────────────────────────────────────────────
 def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
-                          agg_7, agg_today, agg_all, num_all_trades):
+                          agg_7, agg_today, agg_all, num_all_trades, portfolio=None):
     ws.title  = _tab("Dashboard")
     now_ist   = dt.datetime.now(_IST)
     n_cols    = 2   # Parameter | Value
@@ -1772,8 +1876,10 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
     at_buys   = sum(r["Total (bought)"]       for r in agg_all)
     at_sells  = sum(r["Total (sold)"]         for r in agg_all)
     at_comm   = sum(r["Commission"]           for r in agg_all)
-    at_pnl    = sum(r["PnL"]                  for r in agg_all)
-    at_unreal = sum(r["Unrealized PnL"]       for r in agg_all)
+    at_pnl    = sum(r["Realized P&L"]         for r in agg_all)
+    # Unrealized: every open position right now (live from the Gateway).
+    at_unreal = (None if portfolio is None else
+                 sum(_flt(p.get("unrealized")) for p in portfolio.values()))
 
     summary_all = [
         ("Total Trades (fills)", num_all_trades,            ""),
@@ -1781,8 +1887,10 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
         ("Total Bought Value",   f"{at_buys:,.2f}",          ""),
         ("Total Sold Value",     f"{at_sells:,.2f}",         ""),
         ("Commission",           f"{at_comm:,.2f}",          ""),
-        ("Realized PnL",         f"{at_pnl:,.2f}",           ""),
-        ("Unrealized PnL",       f"{at_unreal:,.2f}",        ""),
+        ("Realized P&L",         f"{at_pnl:,.2f}",           ""),
+        ("Unrealized P&L",       ("N/A (Gateway not connected)" if at_unreal is None
+                                  else f"{at_unreal:,.2f}"),  ""),
+        ("Open Positions",       ("N/A" if portfolio is None else len(portfolio)), ""),
         ("Max Exposure",         _fmt_limit(MAX_EXPOSURE),    ""),
         ("Daily Max Loss",       _fmt_limit(DAILY_MAX_LOSS),  ""),
         ("Loss due to bugs",     f"{LOSS_DUE_TO_BUGS:,.2f}", ""),
@@ -1790,7 +1898,7 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
 
     # Dashboard value cells shaded green (positive) / red (negative).
     # Commission is intentionally excluded — it is shown with no colour.
-    color_labels = {"Loss due to bugs", "Unrealized PnL", "Realized PnL"}
+    color_labels = {"Loss due to bugs", "Unrealized P&L", "Realized P&L"}
 
     # ── Assemble all sections with dividers ───────────────────────────
     sections = [
@@ -1846,7 +1954,7 @@ def _fill_trade_list_sheet(ws, sheet_key, rows):
     _style_data_rows(ws, start_row=3, n_cols=n_cols)
 
     # Amount columns: uniform 1,234.00 number format.
-    for h in ("Commission", "Realized PnL"):
+    for h in ("Commission", "Realized P&L", "Unrealized P&L"):
         _apply_amount_format(ws, TODAY_HEADERS.index(h) + 1)
 
     # Shade the Commission / Realized PnL cells green (positive) / red (negative).
@@ -1900,6 +2008,11 @@ def _fill_pending_sheet(ws, rows):
         ws.append(row)
 
     _style_data_rows(ws, start_row=3, n_cols=n_cols)
+    for h in ("Realized P&L", "Unrealized P&L"):
+        col = PENDING_HEADERS.index(h) + 1
+        _apply_amount_format(ws, col)
+        for r in range(3, ws.max_row + 1):
+            _color_pnl_cell(ws.cell(row=r, column=col))
 
     for col, width in enumerate(PENDING_WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(col)].width = width
@@ -1909,10 +2022,10 @@ def _fill_pending_sheet(ws, rows):
 
 
 # ── Open Position sheet ───────────────────────────────────────────────
-def _fill_running_positions_sheet(ws, trade_rows):
-    filtered = [r for r in trade_rows
-                if (parse_trade_date(r) or dt.date.min) >= RUNNING_POSITIONS_FROM]
-    agg     = aggregate(filtered)
+def _fill_running_positions_sheet(ws, trade_rows, portfolio=None):
+    # A position's size and realized P&L come from its whole history, not
+    # just the report window.
+    agg     = aggregate(trade_rows, portfolio)
     running = [r for r in agg if r["Net"] != 0]
     _fill_sheet(ws, "Open Position", running)
 
@@ -1989,7 +2102,7 @@ def main():
 
     print("Connecting to TWS - fetching open/completed orders, executions, and account summary...")
     (orders_by_symbol, account_data, executions,
-     completed_orders, managed_accounts) = fetch_tws_data()
+     completed_orders, managed_accounts, portfolio) = fetch_tws_data()
     if not managed_accounts and not executions and not orders_by_symbol:
         warnings.append("gateway-unreachable-or-empty")
 
@@ -2019,6 +2132,13 @@ def main():
     completed_orders = [o for o in completed_orders
                         if not o.get("account") or mine(o["account"])]
     account_data = account_data.get(ACCOUNT, {})
+    if portfolio is not None:
+        portfolio = {k: v for k, v in portfolio.items() if mine(v.get("account"))}
+        print(f"  Live: {len(portfolio)} open position(s) with market prices.")
+    else:
+        print("[WARN] No live positions from Gateway - Unrealized P&L will be blank.",
+              file=sys.stderr)
+        warnings.append("no-portfolio")
     flex_mine = [r for r in flex_rows if mine(r.get("accountId") or flex_account)]
 
     link_parent_orders(orders_by_symbol)
@@ -2091,7 +2211,7 @@ def main():
     if not rows:
         print("No trades stored yet for this account.")
     write_excel(rows, pending_rows, [], ACCOUNT, account_data, order_lookup,
-                order_status_rows=order_status_rows)
+                order_status_rows=order_status_rows, portfolio=portfolio)
 
     log_run("WARN" if warnings else "OK",
             fills_stored=len(store), live_today=len(executions), flex_rows=len(flex_mine),
