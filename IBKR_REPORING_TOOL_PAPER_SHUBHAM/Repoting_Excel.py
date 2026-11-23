@@ -121,14 +121,6 @@ DATA_FROM = dt.date.today()
 # Running positions use the same cutoff.
 RUNNING_POSITIONS_FROM = DATA_FROM
 
-# Risk limits shown on the Dashboard (hardcoded).
-MAX_EXPOSURE   = 'NA'
-DAILY_MAX_LOSS = 'NA'
-
-# Cumulative loss attributed to bugs — a manually-maintained figure shown on the
-# Dashboard. Update this value here when it changes; it stays fixed otherwise.
-LOSS_DUE_TO_BUGS = 0
-
 # IST offset for report timestamps
 _IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
@@ -1325,15 +1317,6 @@ def _flt(val):
         return 0.0
 
 
-def _fmt_limit(val):
-    """Format a risk-limit value as 1,234.00 when numeric, else show it as-is
-    (e.g. the placeholder 'NA')."""
-    try:
-        return f"{float(val):,.2f}"
-    except (ValueError, TypeError):
-        return str(val)
-
-
 def aggregate(trade_rows, portfolio=None):
     """Per-contract summary. Realized P&L sums the given fills; Unrealized P&L
     is IB's live figure for the contract's open position (0 when flat, blank
@@ -1863,14 +1846,11 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
         ("Unrealized P&L",       ("N/A (Gateway not connected)" if at_unreal is None
                                   else f"{at_unreal:,.2f}"),  ""),
         ("Open Positions",       ("N/A" if portfolio is None else len(portfolio)), ""),
-        ("Max Exposure",         _fmt_limit(MAX_EXPOSURE),    ""),
-        ("Daily Max Loss",       _fmt_limit(DAILY_MAX_LOSS),  ""),
-        ("Loss due to bugs",     f"{LOSS_DUE_TO_BUGS:,.2f}", ""),
     ]
 
     # Dashboard value cells shaded green (positive) / red (negative).
     # Commission is intentionally excluded — it is shown with no colour.
-    color_labels = {"Loss due to bugs", "Unrealized P&L", "Realized P&L"}
+    color_labels = {"Unrealized P&L", "Realized P&L"}
 
     # ── Assemble all sections with dividers ───────────────────────────
     sections = [
