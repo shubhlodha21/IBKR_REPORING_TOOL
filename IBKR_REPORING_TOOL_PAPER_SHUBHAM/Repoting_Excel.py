@@ -94,6 +94,17 @@ EXEC_WAIT  = 15          # seconds to wait for executions (0.5 s timer + fills +
 
 _UNSET = (0, 1.7976931348623157e308)
 
+
+def _qty(v):
+    """Quantity from the TWS API (float / Decimal / unset) as a plain number."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f >= 1e300:                      # UNSET_DECIMAL / UNSET_DOUBLE
+        return None
+    return int(f) if f == int(f) else f
+
 # Report start date — the report only includes trades on/after this date. Set at
 # run time from IBKR_DATA_FROM, else the account's first run date (state.json).
 # Shown on the Index and Dashboard so the reporting window is always explicit.
@@ -149,6 +160,7 @@ class IBOrderApp(EWrapper, EClient):
         self.executions       = {}          # execId -> execution dict
         self.completed_orders = []          # today's filled/cancelled orders
         self.managed_accounts = []          # accounts on this Gateway login
+        self.order_status     = {}          # permId -> (status, filled qty, avg fill price)
         self._orders_done     = threading.Event()
         self._acct_done       = threading.Event()
         self._exec_done       = threading.Event()
@@ -201,7 +213,10 @@ class IBOrderApp(EWrapper, EClient):
             "trigger":   trigger,
             "limit":     limit,
             "quantity":  int(order.totalQuantity) if order.totalQuantity else 0,
+            "parentPermId": getattr(order, "parentPermId", 0) or None,
             "status":    orderState.status,
+            "filled":    _qty(getattr(order, "filledQuantity", None)),
+            "time":      getattr(orderState, "completedTime", "") or "",
         })
 
     def completedOrdersEnd(self):
@@ -212,7 +227,13 @@ class IBOrderApp(EWrapper, EClient):
     def openOrder(self, orderId, contract, order, orderState):
         trigger = order.auxPrice if order.auxPrice not in _UNSET else None
         limit   = order.lmtPrice if order.lmtPrice not in _UNSET else None
-        self.orders_by_symbol[contract.symbol].append({
+        perm    = getattr(order, "permId", 0) or None
+        legs    = self.orders_by_symbol[contract.symbol]
+        # TWS can send openOrder several times for one order (status updates);
+        # keep only the latest copy.
+        if perm:
+            legs[:] = [o for o in legs if o.get("permId") != perm]
+        legs.append({
             "orderId":   orderId,
             "permId":    getattr(order, "permId", 0) or None,
             "account":   getattr(order, "account", "") or "",
@@ -222,7 +243,14 @@ class IBOrderApp(EWrapper, EClient):
             "limit":     limit,
             "quantity":  int(order.totalQuantity),
             "parentId":  order.parentId,
+            "parentPermId": getattr(order, "parentPermId", 0) or None,
+            "status":    getattr(orderState, "status", "") or "",
         })
+
+    def orderStatus(self, orderId, status, filled, remaining, avgFillPrice, permId,
+                    parentId, lastFillPrice, clientId, whyHeld, mktCapPrice=None):
+        if permId:
+            self.order_status[permId] = (status, _qty(filled), avgFillPrice)
 
     def openOrderEnd(self):
         self._orders_done.set()
@@ -283,6 +311,13 @@ def fetch_tws_data():
     # give TWS extra time to push them all through before we disconnect.
     time.sleep(1.5)
     app.disconnect()
+    # Attach the latest status / filled quantity to each open order.
+    for legs in app.orders_by_symbol.values():
+        for o in legs:
+            st = app.order_status.get(o.get("permId"))
+            if st:
+                o["status"] = st[0] or o.get("status", "")
+                o["filled"] = st[1]
     return (app.orders_by_symbol, app.account_data, app.executions,
             app.completed_orders, app.managed_accounts)
 
@@ -393,15 +428,30 @@ def update_order_ledger(ledger, orders_by_symbol, completed_orders=None):
         })
         if perm:
             rec["permId"] = perm
+        if o.get("parentPermId"):
+            rec["parentPermId"] = o["parentPermId"]
         rec.setdefault("first_seen", today)
         ledger[oid] = rec
 
+    link_parent_orders(orders_by_symbol)
     for symbol, legs in orders_by_symbol.items():
         for o in legs:
             _merge(o, symbol)
     for o in (completed_orders or []):
         _merge(o, o["symbol"])
     return ledger
+
+
+def link_parent_orders(orders_by_symbol):
+    """Child orders sometimes only carry parentId (the parent's client order
+    ID); translate it to the parent's permId using the open orders seen."""
+    perm_by_oid = {o["orderId"]: o.get("permId")
+                   for legs in orders_by_symbol.values() for o in legs
+                   if o.get("orderId") and o.get("permId")}
+    for legs in orders_by_symbol.values():
+        for o in legs:
+            if not o.get("parentPermId") and o.get("parentId"):
+                o["parentPermId"] = perm_by_oid.get(o["parentId"])
 
 
 def save_order_ledger(ledger):
@@ -413,11 +463,14 @@ class OrderLookup:
     (symbol, action, order type) and the date the order was last seen."""
 
     def __init__(self, ledger):
-        self.by_perm = {}
-        self.by_key  = defaultdict(list)
+        self.by_perm   = {}
+        self.children  = defaultdict(list)   # parent permId -> child order records
+        self.by_key    = defaultdict(list)
         for rec in ledger.values():
             if rec.get("permId"):
                 self.by_perm[str(rec["permId"])] = rec
+            if rec.get("parentPermId"):
+                self.children[str(rec["parentPermId"])].append(rec)
             key = (rec.get("symbol"), (rec.get("action") or "").upper(),
                    _norm_type(rec.get("orderType")))
             try:
@@ -728,80 +781,182 @@ def build_individual_trade_rows(trade_rows, date_filter=None, order_lookup=None,
     else:
         sel = list(trade_rows)
 
-    # Sort newest-first (descending) by parsed date, then raw timestamp.
-    sel.sort(key=lambda r: (parse_trade_date(r) or dt.date.min,
-                            r.get("dateTime") or r.get("tradeDate") or ""),
-             reverse=True)
-
-    def _fmt(v, dp=2):
-        """Absolute-value format (for qty/price/commission)."""
-        try:
-            return f"{abs(float(v)):.{dp}f}" if v not in (None, "") else ""
-        except (ValueError, TypeError):
-            return str(v) if v else ""
-
-    def _amt(v, signed=False):
-        """Numeric amount (so the cell can carry the 1,234.00 number format).
-        Returns a rounded float (abs unless signed) or '' when not numeric."""
-        try:
-            x = round(float(v), 2) if v not in (None, "") else ""
-        except (ValueError, TypeError):
-            return str(v) if v else ""
-        return x if (x == "" or signed) else abs(x)
+    # Newest first, by the real trade time.
+    sel.sort(key=_trade_sort_dt, reverse=True)
 
     rows = []
     for sr, r in enumerate(sel, start=1):
-        symbol   = r.get("symbol") or r.get("description") or ""
-        raw_side = r.get("buySell", "").upper().strip()
-        action   = ("BUY"  if raw_side in ("BUY", "BOT", "B") else
-                    "SELL" if raw_side in ("SELL", "SLD", "S") else raw_side)
-        account  = (r.get("accountId") or r.get("acctId") or
-                    r.get("account") or "")
-        commission = r.get("ibCommission") or r.get("commission")
-        name       = r.get("description") or r.get("underlyingSymbol") or ""
-        # Trigger / limit are order-level fields, absent from Flex trades.
-        # Prefer the captured order ledger; fall back to any Flex fields.
-        led_lim, led_trg = lookup_order_prices(order_lookup, symbol, action,
-                                               r.get("orderType"), parse_trade_date(r),
-                                               perm_id=r.get("permId") or r.get("ibOrderID"))
-        trigger = (led_trg if led_trg is not None
-                   else r.get("triggerPrice") or r.get("auxPrice") or r.get("stopPrice"))
-        limit   = (led_lim if led_lim is not None
-                   else r.get("limitPrice") or r.get("lmtPrice") or r.get("orderLimitPrice"))
-
-        dt_str    = parse_trade_datetime(r)
-        qty_str   = _fmt(r.get("quantity"),   0)
-        price_str = _fmt(r.get("tradePrice"), 4)
-        trigger_cell = _fmt(trigger, 4)
-        limit_cell   = _fmt(limit,   4)
-
-        # Carry forward any trigger/limit the user typed into the previous
-        # report for this same fill — manual edits win over ledger/Flex values.
-        if manual_prices:
-            m_trg, m_lim = manual_prices.get(
-                _trade_price_key(dt_str, symbol, action, qty_str, price_str),
-                (None, None))
-            if m_trg not in (None, ""):
-                trigger_cell = m_trg
-            if m_lim not in (None, ""):
-                limit_cell = m_lim
-
+        f = _fill_fields(r, order_lookup, manual_prices)
         rows.append([
-            dt_str,             # Date & Time (UTC)
-            _to_gst(dt_str),    # Date & Time (GST) — Dubai, UTC+4
+            f["dt"],            # Date & Time (UTC)
+            f["dt_gst"],        # Date & Time (GST) — Dubai, UTC+4
             sr,
-            symbol,
-            name,
-            action,
-            qty_str,
-            price_str,
-            trigger_cell,
-            limit_cell,
-            r.get("exchange", ""),
+            f["symbol"],
+            f["name"],
+            f["action"],
+            f["qty"],
+            f["price"],
+            f["trigger"],
+            f["limit"],
+            f["exchange"],
             r.get("orderType", ""),
-            _amt(commission),
-            _amt(_row_realized_pnl(r), signed=True),
-            account,
+            f["commission"],
+            f["realized"],
+            f["account"],
+        ])
+    return rows
+
+
+def _fmt_abs(v, dp=2):
+    """Absolute-value format (for qty/price/commission)."""
+    try:
+        return f"{abs(float(v)):.{dp}f}" if v not in (None, "") else ""
+    except (ValueError, TypeError):
+        return str(v) if v else ""
+
+
+def _amt(v, signed=False):
+    """Numeric amount (so the cell can carry the 1,234.00 number format).
+    Returns a rounded float (abs unless signed) or '' when not numeric."""
+    try:
+        x = round(float(v), 2) if v not in (None, "") else ""
+    except (ValueError, TypeError):
+        return str(v) if v else ""
+    return x if (x == "" or signed) else abs(x)
+
+
+def _num(v):
+    try:
+        return float(str(v).replace(",", "")) if v not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _fill_fields(r, order_lookup=None, manual_prices=None):
+    """Display values for one fill, shared by the All Trades sheets.
+
+    Trigger / limit are order-level fields, absent from Flex trades: they come
+    from the captured order ledger (exact by permId, else best guess), and a
+    price typed by hand into the previous report's All Trades sheet wins."""
+    symbol   = r.get("symbol") or r.get("description") or ""
+    raw_side = r.get("buySell", "").upper().strip()
+    action   = ("BUY"  if raw_side in ("BUY", "BOT", "B") else
+                "SELL" if raw_side in ("SELL", "SLD", "S") else raw_side)
+    led_lim, led_trg = lookup_order_prices(order_lookup, symbol, action,
+                                           r.get("orderType"), parse_trade_date(r),
+                                           perm_id=r.get("permId") or r.get("ibOrderID"))
+    trigger = (led_trg if led_trg is not None
+               else r.get("triggerPrice") or r.get("auxPrice") or r.get("stopPrice"))
+    limit   = (led_lim if led_lim is not None
+               else r.get("limitPrice") or r.get("lmtPrice") or r.get("orderLimitPrice"))
+
+    dt_str    = parse_trade_datetime(r)
+    qty_str   = _fmt_abs(r.get("quantity"),   0)
+    price_str = _fmt_abs(r.get("tradePrice"), 4)
+    trigger_cell = _fmt_abs(trigger, 4)
+    limit_cell   = _fmt_abs(limit,   4)
+    if manual_prices:
+        m_trg, m_lim = manual_prices.get(
+            _trade_price_key(dt_str, symbol, action, qty_str, price_str), (None, None))
+        if m_trg not in (None, ""):
+            trigger_cell = m_trg
+        if m_lim not in (None, ""):
+            limit_cell = m_lim
+
+    return {
+        "dt": dt_str, "dt_gst": _to_gst(dt_str), "symbol": symbol,
+        "name": r.get("description") or r.get("underlyingSymbol") or "",
+        "action": action, "qty": qty_str, "price": price_str,
+        "trigger": trigger_cell, "limit": limit_cell,
+        "exchange": r.get("exchange", ""),
+        "commission": _amt(r.get("ibCommission") or r.get("commission")),
+        "realized": _amt(_row_realized_pnl(r), signed=True),
+        "account": r.get("accountId") or r.get("acctId") or r.get("account") or "",
+    }
+
+
+# ----------------------------------------------------------------------
+# All Trades Detail: fills grouped by order. An entry order and its attached
+# stop / exit orders share one Sr No (6, 6.1, 6.2 ...), numbered oldest first.
+# ----------------------------------------------------------------------
+DETAIL_HEADERS = ["Date & Time (UTC)", "Date & Time (GST)", "Sr No", "Contract", "Name",
+                  "Action", "Quantity", "Price", "Order Type", "Trigger Price", "Offset",
+                  "Limit Price", "SL %", "Exchange", "Commission", "Realized", "Account"]
+DETAIL_WIDTHS  = [20, 20, 8, 12, 28, 8, 10, 12, 11, 12, 9, 12, 9, 12, 12, 12, 13]
+
+
+def build_detail_trade_rows(trade_rows, order_lookup=None, manual_prices=None):
+    groups, n, out = {}, 0, []
+    for idx, r in enumerate(sorted(trade_rows, key=_trade_sort_dt)):
+        oid = r.get("permId") or r.get("ibOrderID")
+        oid = str(oid) if oid not in (None, "", 0, "0") else None
+        rec = order_lookup.by_perm.get(oid) if (order_lookup and oid) else None
+        parent = str(rec["parentPermId"]) if rec and rec.get("parentPermId") else None
+
+        gkey = parent or oid or f"fill-{idx}"
+        if gkey not in groups:
+            n += 1
+            groups[gkey] = [n, 0]
+            sr = str(n)
+        else:
+            groups[gkey][1] += 1
+            sr = f"{groups[gkey][0]}.{groups[gkey][1]}"
+
+        f = _fill_fields(r, order_lookup, manual_prices)
+        trg, lim = _num(f["trigger"]), _num(f["limit"])
+        offset = f"{abs(lim - trg):.4f}".rstrip("0").rstrip(".") if (trg and lim) else ""
+
+        # SL %: on entry rows only - entry price vs its own stop-loss order.
+        sl = ""
+        if rec and not parent and oid:
+            stops = [c for c in order_lookup.children.get(oid, [])
+                     if _norm_type(c.get("orderType")).startswith("STP") and c.get("trigger")]
+            entry = trg or lim
+            if stops and entry:
+                sl = f"{abs(entry - float(stops[0]['trigger'])) / entry * 100:.2f}%"
+
+        out.append([
+            f["dt"], f["dt_gst"], sr, f["symbol"], f["name"], f["action"],
+            f["qty"], f["price"],
+            r.get("orderType") or (rec or {}).get("orderType", ""),
+            f["trigger"], offset, f["limit"], sl, f["exchange"],
+            f["commission"], f["realized"], f["account"],
+        ])
+    out.reverse()                                   # newest first
+    return out
+
+
+# ----------------------------------------------------------------------
+# Order_Status: every order seen on this run (open + today's completed).
+# ----------------------------------------------------------------------
+ORDER_STATUS_HEADERS = ["Sr No", "Contract", "Action", "Order Type", "Trigger", "Limit",
+                        "Quantity", "Filled", "Status", "Completed Time",
+                        "Order ID", "Parent ID", "Account"]
+ORDER_STATUS_WIDTHS  = [7, 12, 8, 11, 11, 11, 10, 9, 13, 26, 12, 12, 13]
+
+
+def build_order_status_rows(orders_by_symbol, completed_orders):
+    orders = {}
+    for sym, legs in orders_by_symbol.items():
+        for o in legs:
+            key = o.get("permId") or f"open-{sym}-{o.get('orderId')}"
+            orders[key] = dict(o, symbol=sym)
+    for o in completed_orders:                      # final status wins
+        orders[o.get("permId") or o.get("orderId")] = dict(o)
+
+    def _sort(o):
+        grp = o.get("parentPermId") or o.get("permId") or 0
+        return (o.get("symbol") or "", str(grp), 1 if o.get("parentPermId") else 0,
+                str(o.get("permId") or ""))
+
+    rows = []
+    for sr, o in enumerate(sorted(orders.values(), key=_sort), start=1):
+        rows.append([
+            sr, o.get("symbol", ""), o.get("action", ""), o.get("orderType", ""),
+            _fmt_price(o.get("trigger")), _fmt_price(o.get("limit")),
+            o.get("quantity", ""), "" if o.get("filled") is None else o.get("filled"),
+            o.get("status", ""), o.get("time", ""),
+            o.get("permId") or "", o.get("parentPermId") or "", o.get("account", ""),
         ])
     return rows
 
@@ -1330,7 +1485,9 @@ def _sheet_titles():
     return {
         "Dashboard":     "ACCOUNT DASHBOARD",
         "Pending Order": "PENDING ORDERS",
+        "Order_Status":  "ORDER STATUS  (Orders seen on this run)",
         "All Trades":    f"ALL TRADES  (From {frm})",
+        "All Trades Detail": f"ALL TRADES DETAIL  (From {frm})",
         "Open Position": f"OPEN POSITIONS  (From {frm})",
         "Trade Summary": f"TRADE SUMMARY  (From {frm})",
     }
@@ -1377,7 +1534,8 @@ def _apply_autofilter(ws, n_cols, header_row=2):
     ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"
 
 
-def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup=None):
+def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup=None,
+                order_status_rows=None):
     today     = dt.date.today()
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
@@ -1416,19 +1574,26 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     all_trade_rows = build_individual_trade_rows(rows, order_lookup=order_lookup,
                                                  manual_prices=manual_prices)
     print(f"  [All Trades] {len(all_trade_rows)} individual trade(s) since {DATA_FROM:%d-%b-%Y}.")
+    detail_rows = build_detail_trade_rows(rows, order_lookup=order_lookup,
+                                          manual_prices=manual_prices)
 
-    # Sheet sequence: Index, Dashboard, Pending Order, Open Position, All Trades,
-    # Trade Summary.
+    # Sheet sequence: Index, Dashboard, Pending Order, Order_Status, Open Position,
+    # All Trades, All Trades Detail, Trade Summary.
     wb = Workbook()
     _fill_index_sheet(wb.active,
-                      ["Dashboard", "Pending Order", "Open Position",
-                       "All Trades", "Trade Summary"],
+                      ["Dashboard", "Pending Order", "Order_Status", "Open Position",
+                       "All Trades", "All Trades Detail", "Trade Summary"],
                       account_id)
     _fill_dashboard_sheet(wb.create_sheet(), account_id, account_data, pending_rows,
                           agg_7, agg_today, agg_all, len(all_trade_rows))
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
+    _fill_table_sheet(wb.create_sheet(), "Order_Status", ORDER_STATUS_HEADERS,
+                      ORDER_STATUS_WIDTHS, order_status_rows or [])
     _fill_running_positions_sheet(wb.create_sheet(),  rows)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
+    _fill_table_sheet(wb.create_sheet(), "All Trades Detail", DETAIL_HEADERS,
+                      DETAIL_WIDTHS, detail_rows,
+                      amount_cols=("Commission", "Realized"), color_cols=("Realized",))
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
     os.makedirs(_REPORTS_DIR, exist_ok=True)
     wb.save(OUTPUT_FILE)
@@ -1675,6 +1840,31 @@ def _fill_trade_list_sheet(ws, sheet_key, rows):
     ws.freeze_panes = "A3"
 
 
+# ── Generic table sheet (Order_Status, All Trades Detail) ─────────────
+def _fill_table_sheet(ws, key, headers, widths, rows, amount_cols=(), color_cols=()):
+    ws.title = _tab(key)
+    n_cols   = len(headers)
+
+    _write_title_row(ws, _sheet_titles()[key], n_cols)
+    _write_header_row(ws, headers, row=2)
+    for row in rows:
+        ws.append(row)
+    _style_data_rows(ws, start_row=3, n_cols=n_cols)
+
+    for h in amount_cols:
+        _apply_amount_format(ws, headers.index(h) + 1)
+    for h in color_cols:
+        col = headers.index(h) + 1
+        for r in range(3, ws.max_row + 1):
+            _color_pnl_cell(ws.cell(row=r, column=col))
+
+    for col, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    _apply_cell_borders(ws, n_cols, start_row=2)
+    _apply_autofilter(ws, n_cols)
+    ws.freeze_panes = "A3"
+
+
 # ── Pending Order sheet ────────────────────────────────────────────────
 def _fill_pending_sheet(ws, rows):
     ws.title  = _tab("Pending Order")
@@ -1808,7 +1998,9 @@ def main():
     account_data = account_data.get(ACCOUNT, {})
     flex_mine = [r for r in flex_rows if mine(r.get("accountId") or flex_account)]
 
+    link_parent_orders(orders_by_symbol)
     pending_rows = build_pending_rows(orders_by_symbol)
+    order_status_rows = build_order_status_rows(orders_by_symbol, completed_orders)
     print(f"  Live: {len(pending_rows)} pending order rows | {len(executions)} fill(s) today | "
           f"{len(completed_orders)} completed order(s) | {len(account_data)} account tag(s).")
     print(f"  Flex: {len(flex_mine)} of {len(flex_rows)} trade record(s) belong to {ACCOUNT}.")
@@ -1842,6 +2034,21 @@ def main():
         counts["live_" + upsert_fill(store, _exec_to_flex_row(ex), "LIVE")] += 1
     for r in flex_mine:
         counts["flex_" + upsert_fill(store, r, "FLEX")] += 1
+
+    # Legacy fills with no execution ID can't be matched to Flex by ID. Live
+    # fills always carry an ID now, so these only come from the old JSON stores.
+    # Inside the period the Flex statement covers, Flex is the complete record,
+    # so such leftovers would be double counts - drop them.
+    flex_dates = [d for d in (parse_trade_date(r) for r in flex_mine) if d]
+    if flex_dates:
+        lo, hi = min(flex_dates), max(flex_dates)
+        stale = [k for k, r in store.items()
+                 if k.startswith("fp:") and r.get("source") == "LIVE"
+                 and lo <= (parse_trade_date(r) or dt.date.min) <= hi]
+        for k in stale:
+            del store[k]
+        if stale:
+            print(f"  [Cleanup] removed {len(stale)} old no-ID fill(s) already covered by Flex.")
     days_written = save_fill_store(store)
     state["last_run"] = dt.datetime.now().isoformat(timespec="seconds")
     save_state(state)
@@ -1860,7 +2067,8 @@ def main():
     rows = list(store.values())
     if not rows:
         print("No trades stored yet for this account.")
-    write_excel(rows, pending_rows, [], ACCOUNT, account_data, order_lookup)
+    write_excel(rows, pending_rows, [], ACCOUNT, account_data, order_lookup,
+                order_status_rows=order_status_rows)
 
     log_run("WARN" if warnings else "OK",
             fills_stored=len(store), live_today=len(executions), flex_rows=len(flex_mine),
