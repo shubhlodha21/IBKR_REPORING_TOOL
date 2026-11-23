@@ -2026,7 +2026,21 @@ def _fill_running_positions_sheet(ws, trade_rows, portfolio=None):
     # A position's size and realized P&L come from its whole history, not
     # just the report window.
     agg     = aggregate(trade_rows, portfolio)
-    running = [r for r in agg if r["Net"] != 0]
+    if portfolio is None:
+        # Gateway not connected: fall back to the net quantity from history.
+        running = [r for r in agg if r["Net"] != 0]
+    else:
+        # IB's live portfolio is the authority on what is open (FX conversions,
+        # for example, are cash balances to IB, not positions).
+        running = [dict(r, Net=portfolio[r["Contract"]]["position"])
+                   for r in agg if r["Contract"] in portfolio]
+        known = {r["Contract"] for r in running}
+        for sym, p in portfolio.items():            # opened before stored history
+            if sym not in known:
+                running.append({h: "" for h in HEADERS} | {
+                    "Contract": sym, "Net": p["position"], "Realized P&L": 0.0,
+                    "Unrealized P&L": round(_flt(p.get("unrealized")), 2)})
+        running.sort(key=lambda r: r["Contract"])
     _fill_sheet(ws, "Open Position", running)
 
 
