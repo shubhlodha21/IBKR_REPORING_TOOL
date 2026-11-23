@@ -683,34 +683,57 @@ def _total_amount(qty, trigger, limit_price):
 
 
 def build_pending_rows(orders_by_symbol):
+    """One numbered block per working entry order (entry row + its stop/exit
+    rows). When the entry has already filled - the position is open and only
+    its stop is still working - the stop is shown once, as its own block.
+    Name is blank: TWS orders don't carry the Flex full name."""
     rows = []
     sr = 0
-    for symbol, legs in orders_by_symbol.items():
-        sr += 1
-        parents  = [o for o in legs if not o["parentId"]]
-        children = [o for o in legs if o["parentId"]]
-        entry = parents[0] if parents else legs[0]
-        stop  = children[0] if children else (legs[1] if len(legs) > 1 else None)
 
-        # Entry row — show Total Amount.  Name is blank: pending orders come
-        # live from TWS, which doesn't carry the Flex 'description' full name.
-        rows.append([
-            sr, symbol, "", entry["action"], entry["orderType"],
-            _fmt_price(entry["trigger"]), _fmt_price(entry["limit"]),
-            _offset(entry["trigger"], entry["limit"]),
-            _sl_pct(entry["trigger"], stop["trigger"] if stop else None),
-            entry["quantity"],
-            _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
-        ])
-        # Stop/SELL row — no Total Amount.  Repeat the Contract from the entry
-        # row above so it isn't left blank.
-        if stop:
+    def _is_child_of(child, parent):
+        return ((child.get("parentPermId") and child.get("parentPermId") == parent.get("permId"))
+                or (child.get("parentId") and child.get("parentId") == parent.get("orderId")))
+
+    for symbol, legs in orders_by_symbol.items():
+        parents  = [o for o in legs if not (o.get("parentId") or o.get("parentPermId"))]
+        children = [o for o in legs if o not in parents]
+        used = set()
+
+        for entry in parents:
+            kids = [c for c in children if _is_child_of(c, entry)]
+            used.update(id(c) for c in kids)
+            stop = next((c for c in kids if _norm_type(c.get("orderType")).startswith("STP")),
+                        kids[0] if kids else None)
+            sr += 1
+            # Entry row - with SL % and Total Amount.
             rows.append([
-                "", symbol, "", stop["action"], stop["orderType"],
-                _fmt_price(stop["trigger"]), _fmt_price(stop["limit"]),
-                _offset(stop["trigger"], stop["limit"]),
-                "", stop["quantity"],
-                "",
+                sr, symbol, "", entry["action"], entry["orderType"],
+                _fmt_price(entry["trigger"]), _fmt_price(entry["limit"]),
+                _offset(entry["trigger"], entry["limit"]),
+                _sl_pct(entry["trigger"] or entry["limit"], stop["trigger"] if stop else None),
+                entry["quantity"],
+                _total_amount(entry["quantity"], entry["trigger"], entry["limit"]),
+            ])
+            # Its stop / exit rows - no Sr No, SL % or Total Amount.
+            for c in kids:
+                rows.append([
+                    "", symbol, "", c["action"], c["orderType"],
+                    _fmt_price(c["trigger"]), _fmt_price(c["limit"]),
+                    _offset(c["trigger"], c["limit"]),
+                    "", c["quantity"], "",
+                ])
+
+        # Children whose entry already filled (open position): one row each.
+        for c in children:
+            if id(c) in used:
+                continue
+            sr += 1
+            rows.append([
+                sr, symbol, "", c["action"], c["orderType"],
+                _fmt_price(c["trigger"]), _fmt_price(c["limit"]),
+                _offset(c["trigger"], c["limit"]),
+                "", c["quantity"],
+                _total_amount(c["quantity"], c["trigger"], c["limit"]),
             ])
     return rows
 
