@@ -1,25 +1,34 @@
 """
-Fetch IBKR Flex Query trades and write an Excel file with sheets:
-  - Dashboard         (account info + 7-day & prev-day P&L summary)
-  - Pending Order     (live from TWS)
-  - Running Positions (net open positions from 24 May 2026 onwards)
-  - PreviousDay
-  - Past7Days
-  - Past30Days
+Daily IBKR MIS report for ONE account. Each run:
+  1. Pulls live data from TWS / IB Gateway: today's fills, open orders,
+     today's completed orders (for trigger/limit) and the account summary.
+  2. Downloads the Flex Query statement (should cover the last 30 days) to fill
+     in and confirm earlier days. A Flex failure is logged, not fatal.
+  3. Merges both into a per-day fill store, de-duplicated by IBKR execution ID:
+        data/<ACCOUNT>/fills/YYYY-MM-DD.json
+        data/<ACCOUNT>/orders_ledger.json
+        data/<ACCOUNT>/state.json
+        data/runs.log
+  4. Writes reports/MIS_paper_<date>_Shubham.xlsx with the sheets
+     Index, Dashboard, Pending Order, Open Position, All Trades, Trade Summary,
+     covering every trade from DATA_FROM up to the moment of the run.
 
 Usage:
-    pip install requests openpyxl ibapi
-    python Repoting_Excel.py
+    run.ps1 (Windows) or run.sh (Linux/Mac) - both load .env first.
 
-Notes:
-  - The Flex Query must cover at least 30 days.
-  - TWS or IB Gateway must be running for the Pending Order sheet.
-  - Set IBKR_TOKEN and IBKR_QUERY_ID as environment variables (via .env).
+.env settings:
+  IBKR_TOKEN, IBKR_QUERY_ID   Flex Web Service token and query (required)
+  IBKR_ACCOUNT                account to report on, e.g. DU4293588. Optional when
+                              the Gateway login has exactly one account.
+  IBKR_DATA_FROM              optional report start date (YYYY-MM-DD). When unset,
+                              the date of the first run for the account is used.
 """
 
 import os
+import re
 import sys
 import json
+import glob
 import time
 import threading
 import datetime as dt
@@ -45,31 +54,27 @@ if not TOKEN or not QUERY_ID:
     sys.exit("Error: IBKR_TOKEN and IBKR_QUERY_ID must be set as environment variables.\n"
              "Copy .env.example to .env and fill in your credentials, then run via run.ps1.")
 
-_REPORTS_DIR = "reports"
-os.makedirs(_REPORTS_DIR, exist_ok=True)
-OUTPUT_FILE = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_Shubham.xlsx")
+# Account to report on. Resolved at run time (see resolve_account) when unset.
+ACCOUNT = os.environ.get("IBKR_ACCOUNT", "").strip()
+_DATA_FROM_ENV = os.environ.get("IBKR_DATA_FROM", "").strip()
 
-# Persistent order ledger — accumulates trigger/limit from live open orders on
-# every run, so trades can be matched to the prices set when the order was placed.
-# (IBKR does NOT retain this on executed trades, so we must capture it ourselves.)
-_BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-LEDGER_FILE = os.path.join(_BASE_DIR, "orders_ledger.json")
+_BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+_REPORTS_DIR = os.path.join(_BASE_DIR, "reports")
+OUTPUT_FILE  = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_Shubham.xlsx")
 
-# Persistent trades cache — accumulates today's live TWS executions on every run.
-# reqExecutions only ever returns the CURRENT day's fills, while the Flex
-# statement lags 1-2 days behind, so the most recent trading day(s) fall into a
-# gap and never appear. Persisting each day's executions bridges that gap until
-# Flex finally publishes them. (See update_trades_cache.)
-TRADES_CACHE_FILE = os.path.join(_BASE_DIR, "trades_cache.json")
-TRADES_CACHE_DAYS = 30   # retention window — generously covers the Flex lag
+# Per-account store. Every fill is kept in the file for its trade date, keyed by
+# IBKR execution ID, so Flex and live TWS copies of one fill share one record.
+# Nothing is ever pruned, so a missed run or an empty Flex download can't shrink
+# the report. ACCOUNT_DIR is set once the account is known (see set_account).
+DATA_DIR    = os.path.join(_BASE_DIR, "data")
+RUN_LOG     = os.path.join(DATA_DIR, "runs.log")
+ACCOUNT_DIR = None
 
-# Persistent FULL trade history — unlike the trades cache (which only bridges the
-# Flex lag and prunes after TRADES_CACHE_DAYS), this accumulates EVERY trade ever
-# seen, from both the Flex statement and live TWS fills, and is NEVER pruned. The
-# report is built from this store, so the complete record from DATA_FROM onward is
-# preserved even when the Flex Query only returns a short rolling window, and a
-# single empty/failed day can never shrink the sheets. (See update_trade_history.)
-TRADE_HISTORY_FILE = os.path.join(_BASE_DIR, "trade_history.json")
+# Pre-2026-11 single-file stores. Imported once into the per-account store (only
+# the chosen account's records) and then left untouched as a backup.
+LEGACY_HISTORY_FILE = os.path.join(_BASE_DIR, "trade_history.json")
+LEGACY_CACHE_FILE   = os.path.join(_BASE_DIR, "trades_cache.json")
+LEGACY_LEDGER_FILE  = os.path.join(_BASE_DIR, "orders_ledger.json")
 
 BASE     = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
 SEND_URL = f"{BASE}/SendRequest"
@@ -89,11 +94,12 @@ EXEC_WAIT  = 15          # seconds to wait for executions (0.5 s timer + fills +
 
 _UNSET = (0, 1.7976931348623157e308)
 
-# Global data cutoff — the report only includes trades on/after this date.
-# This is shown on the Dashboard so the reporting window is always explicit.
-DATA_FROM = dt.date(2026, 5, 25)
+# Report start date — the report only includes trades on/after this date. Set at
+# run time from IBKR_DATA_FROM, else the account's first run date (state.json).
+# Shown on the Index and Dashboard so the reporting window is always explicit.
+DATA_FROM = dt.date.today()
 
-# Running positions use the same global cutoff.
+# Running positions use the same cutoff.
 RUNNING_POSITIONS_FROM = DATA_FROM
 
 # Risk limits shown on the Dashboard (hardcoded).
@@ -142,6 +148,7 @@ class IBOrderApp(EWrapper, EClient):
         self.account_data     = {}          # tag -> (value, currency)
         self.executions       = {}          # execId -> execution dict
         self.completed_orders = []          # today's filled/cancelled orders
+        self.managed_accounts = []          # accounts on this Gateway login
         self._orders_done     = threading.Event()
         self._acct_done       = threading.Event()
         self._exec_done       = threading.Event()
@@ -156,6 +163,9 @@ class IBOrderApp(EWrapper, EClient):
 
     def connectAck(self):
         self.connected_ok = True
+
+    def managedAccounts(self, accountsList):
+        self.managed_accounts = [a.strip() for a in accountsList.split(",") if a.strip()]
 
     def nextValidId(self, orderId):
         self.connected_ok = True
@@ -183,6 +193,8 @@ class IBOrderApp(EWrapper, EClient):
         oid     = getattr(order, "permId", None) or getattr(order, "orderId", None)
         self.completed_orders.append({
             "orderId":   f"C{oid}",
+            "permId":    getattr(order, "permId", 0) or None,
+            "account":   getattr(order, "account", "") or "",
             "symbol":    contract.symbol,
             "action":    order.action,
             "orderType": order.orderType,
@@ -202,6 +214,8 @@ class IBOrderApp(EWrapper, EClient):
         limit   = order.lmtPrice if order.lmtPrice not in _UNSET else None
         self.orders_by_symbol[contract.symbol].append({
             "orderId":   orderId,
+            "permId":    getattr(order, "permId", 0) or None,
+            "account":   getattr(order, "account", "") or "",
             "action":    order.action,
             "orderType": order.orderType,
             "trigger":   trigger,
@@ -215,7 +229,8 @@ class IBOrderApp(EWrapper, EClient):
 
     # ── account summary ───────────────────────────────────────────────
     def accountSummary(self, reqId, account, tag, value, currency):
-        self.account_data[tag] = (value, currency)
+        # Kept per account; main() picks the reported account's figures.
+        self.account_data.setdefault(account, {})[tag] = (value, currency)
 
     def accountSummaryEnd(self, reqId):
         self._acct_done.set()
@@ -225,6 +240,8 @@ class IBOrderApp(EWrapper, EClient):
         self.executions[execution.execId] = {
             "execId":     execution.execId,   # IBKR execution ID (== Flex ibExecID)
             "account":    execution.acctNumber,
+            "permId":     getattr(execution, "permId", 0) or None,   # links fill -> order
+            "conId":      getattr(contract, "conId", 0) or None,
             "contract":   contract.symbol,
             "action":     "BUY" if execution.side in ("BOT", "BUY") else "SELL",
             "quantity":   execution.shares,
@@ -254,7 +271,7 @@ def fetch_tws_data():
     except Exception as e:
         print(f"[TWS] Could not connect ({e}) - live sheets will be empty.",
               file=sys.stderr)
-        return {}, {}, {}, []
+        return {}, {}, {}, [], []
     threading.Thread(target=app.run, daemon=True).start()
     # Each feed has its own generous timeout so a slow/missing feed
     # doesn't block the others.
@@ -266,12 +283,81 @@ def fetch_tws_data():
     # give TWS extra time to push them all through before we disconnect.
     time.sleep(1.5)
     app.disconnect()
-    return app.orders_by_symbol, app.account_data, app.executions, app.completed_orders
+    return (app.orders_by_symbol, app.account_data, app.executions,
+            app.completed_orders, app.managed_accounts)
+
+
+# ----------------------------------------------------------------------
+# Small file helpers
+# ----------------------------------------------------------------------
+def _read_json(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[store] {path} unreadable ({e}) - ignoring it.", file=sys.stderr)
+    return default
+
+
+def _write_json_atomic(path, obj):
+    """Write via a temp file + rename, so a crash mid-write never leaves a
+    half-written (corrupt) file behind."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def log_run(status, **info):
+    """Append one line per run to data/runs.log."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        parts = " | ".join(f"{k}={v}" for k, v in info.items())
+        with open(RUN_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} | {status} | "
+                    f"account={ACCOUNT or '?'} | {parts}\n")
+    except OSError as e:
+        print(f"[run-log] could not write: {e}", file=sys.stderr)
+
+
+def set_account(account):
+    """Point every per-account path at data/<account>/."""
+    global ACCOUNT, ACCOUNT_DIR
+    ACCOUNT     = account
+    ACCOUNT_DIR = os.path.join(DATA_DIR, account)
+
+
+def _fills_dir():
+    return os.path.join(ACCOUNT_DIR, "fills")
+
+
+def _ledger_file():
+    return os.path.join(ACCOUNT_DIR, "orders_ledger.json")
+
+
+def _state_file():
+    return os.path.join(ACCOUNT_DIR, "state.json")
+
+
+def load_state():
+    return _read_json(_state_file(), {})
+
+
+def save_state(state):
+    _write_json_atomic(_state_file(), state)
+
+
+def set_data_from(d):
+    global DATA_FROM, RUNNING_POSITIONS_FROM
+    DATA_FROM = RUNNING_POSITIONS_FROM = d
 
 
 # ----------------------------------------------------------------------
 # Persistent order ledger: capture trigger/limit from live open orders so
 # trades can later be matched to the prices set when the order was placed.
+# (IBKR does NOT retain these on executed trades, so we capture them ourselves.)
 # ----------------------------------------------------------------------
 def _norm_type(t):
     """Normalise order type for matching (TWS 'STP LMT' vs Flex 'STPLMT')."""
@@ -279,13 +365,7 @@ def _norm_type(t):
 
 
 def load_order_ledger():
-    if os.path.exists(LEDGER_FILE):
-        try:
-            with open(LEDGER_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            print("[ledger] existing ledger unreadable - starting fresh.", file=sys.stderr)
-    return {}
+    return _read_json(_ledger_file(), {})
 
 
 def update_order_ledger(ledger, orders_by_symbol, completed_orders=None):
@@ -293,214 +373,74 @@ def update_order_ledger(ledger, orders_by_symbol, completed_orders=None):
 
     Open orders cover still-working orders; completed orders cover ones that
     already filled today (which an EOD run would otherwise miss). Both carry
-    the limit/trigger prices set when the order was placed.
+    the limit/trigger prices set when the order was placed. Orders are keyed by
+    permId (IBKR's permanent order ID, also carried on every fill) when known.
     """
     today = dt.date.today().isoformat()
 
-    def _merge(oid, symbol, action, order_type, limit, trigger, quantity):
+    def _merge(o, symbol):
+        perm = o.get("permId")
+        oid  = f"P{perm}" if perm else str(o["orderId"])
         rec = ledger.get(oid, {})
         rec.update({
             "symbol":    symbol,
-            "action":    (action or "").upper(),
-            "orderType": _norm_type(order_type),
-            "limit":     limit,
-            "trigger":   trigger,
-            "quantity":  quantity,
+            "action":    (o.get("action") or "").upper(),
+            "orderType": _norm_type(o.get("orderType")),
+            "limit":     o.get("limit"),
+            "trigger":   o.get("trigger"),
+            "quantity":  o.get("quantity"),
             "last_seen": today,
         })
+        if perm:
+            rec["permId"] = perm
         rec.setdefault("first_seen", today)
         ledger[oid] = rec
 
     for symbol, legs in orders_by_symbol.items():
         for o in legs:
-            _merge(str(o["orderId"]), symbol, o["action"], o["orderType"],
-                   o["limit"], o["trigger"], o["quantity"])
-
+            _merge(o, symbol)
     for o in (completed_orders or []):
-        _merge(str(o["orderId"]), o["symbol"], o["action"], o["orderType"],
-               o["limit"], o["trigger"], o["quantity"])
-
+        _merge(o, o["symbol"])
     return ledger
 
 
 def save_order_ledger(ledger):
-    try:
-        with open(LEDGER_FILE, "w", encoding="utf-8") as f:
-            json.dump(ledger, f, indent=2)
-    except OSError as e:
-        print(f"[ledger] could not save: {e}", file=sys.stderr)
+    _write_json_atomic(_ledger_file(), ledger)
 
 
-def _parse_exec_date(raw):
-    """Parse an IBKR execution.time string into a date (for cache pruning)."""
-    if not raw:
-        return None
-    datepart = str(raw).split()[0]          # 'YYYYMMDD  HH:MM:SS [tz]' -> 'YYYYMMDD'
-    for fmt in ("%Y%m%d", "%Y-%m-%d"):
-        try:
-            return dt.datetime.strptime(datepart, fmt).date()
-        except ValueError:
-            continue
-    return None
+class OrderLookup:
+    """Ledger index: exact match by permId, else best guess by
+    (symbol, action, order type) and the date the order was last seen."""
 
-
-def load_trades_cache():
-    if os.path.exists(TRADES_CACHE_FILE):
-        try:
-            with open(TRADES_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            print("[trades-cache] existing cache unreadable - starting fresh.", file=sys.stderr)
-    return {}
-
-
-def update_trades_cache(cache, executions):
-    """Merge this run's live TWS executions into the persistent cache (keyed by
-    execId), then prune anything older than TRADES_CACHE_DAYS.
-
-    reqExecutions only returns the CURRENT day's fills, while the Flex statement
-    lags 1-2 days behind. Without this cache, trades from the most recent day(s)
-    are silently dropped — too new for Flex, too old for the live feed on the
-    next run. Persisting each day's executions keeps them until Flex catches up.
-    """
-    for exec_id, ex in executions.items():
-        rec = dict(ex)
-        # A commission can arrive blank on one run and populated on a later one;
-        # never overwrite a known commission with None.
-        old = cache.get(exec_id)
-        if old and rec.get("commission") is None and old.get("commission") is not None:
-            rec["commission"] = old["commission"]
-        cache[exec_id] = rec
-
-    cutoff = dt.date.today() - dt.timedelta(days=TRADES_CACHE_DAYS)
-    for exec_id in list(cache.keys()):
-        d = _parse_exec_date(cache[exec_id].get("time"))
-        if d is not None and d < cutoff:
-            del cache[exec_id]
-    return cache
-
-
-def save_trades_cache(cache):
-    try:
-        with open(TRADES_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2)
-    except OSError as e:
-        print(f"[trades-cache] could not save: {e}", file=sys.stderr)
-
-
-# ----------------------------------------------------------------------
-# Persistent FULL trade history: accumulate every trade ever seen so the
-# report always shows the complete record from DATA_FROM, regardless of how
-# short a window the Flex Query returns on any single run.
-# ----------------------------------------------------------------------
-def _trade_history_key(row):
-    """Stable string identity for one fill, shared by Flex and live-TWS rows.
-
-    Uses the same (date, symbol, side, qty, price) fingerprint as the live/Flex
-    de-dup, so a fill captured live today and re-published by Flex tomorrow maps
-    to the SAME entry (no duplicate). JSON keys must be strings, so the tuple is
-    joined into one."""
-    k = _fill_dedup_key(row.get("symbol") or row.get("description"),
-                        row.get("buySell"), row.get("quantity"),
-                        row.get("tradePrice"), parse_trade_date(row))
-    return "|".join(str(p) for p in k)
-
-
-def _fill_identity(row):
-    """The IBKR execution ID for one fill — the SINGLE identifier that is shared,
-    byte-for-byte, by both the Flex statement (`ibExecID`) and the live TWS feed
-    (`execId`). Returns None only for legacy cached rows that predate this key,
-    so callers fall back to the coarse (date, symbol, side, qty, price)
-    fingerprint.
-
-    Keying on this true per-execution ID is what stops distinct fills that happen
-    to share the same date/side/qty/price (e.g. several 1-unit GBP buys at the
-    same rate) from collapsing into one entry, while still mapping a fill captured
-    live today to the SAME entry when Flex republishes it tomorrow."""
-    for k in ("ibExecID", "execID", "execId"):
-        v = row.get(k)
-        if v not in (None, ""):
-            return str(v)
-    return None
-
-
-def load_trade_history():
-    if os.path.exists(TRADE_HISTORY_FILE):
-        try:
-            with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            print("[trade-history] existing history unreadable - starting fresh.", file=sys.stderr)
-    return {}
-
-
-def update_trade_history(history, rows):
-    """Merge this run's trades (Flex statement + live TWS fills) into the
-    persistent full-history store, keyed by fill identity.
-
-    Each fill is keyed by its IBKR execution ID (see _fill_identity) so distinct
-    fills are never collapsed and a fill re-seen across feeds/runs maps to the
-    SAME entry. Only legacy rows with no execution ID fall back to the coarse
-    fingerprint key.
-
-    Never pruned. When a fill is seen again (e.g. Flex later republishes a fill
-    first captured live), its richer fields are merged in WITHOUT overwriting any
-    known value with a blank, and internal computed keys (e.g. _calcRealizedPnl)
-    are stripped so realized P&L is always recomputed fresh across the full set.
-    """
-    for r in rows:
-        clean = {k: v for k, v in r.items() if not k.startswith("_")}
-        eid   = _fill_identity(r)
-        if eid is not None:
-            key = "id:" + eid
-            # This fill now has a precise per-execution key. Purge any legacy entry
-            # stored under the coarse fingerprint (older runs collapsed several
-            # distinct fills into that one key) so the per-fill records replace it
-            # cleanly rather than double-counting alongside it.
-            fp = _trade_history_key(r)
-            history.pop(fp, None)
-        else:
-            key = _trade_history_key(r)
-        old = history.get(key)
-        if old:
-            merged = dict(old)
-            for k, v in clean.items():
-                if v not in (None, ""):     # keep richer Flex fields, never blank out
-                    merged[k] = v
-            history[key] = merged
-        else:
-            history[key] = clean
-    return history
-
-
-def save_trade_history(history):
-    try:
-        with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
-    except OSError as e:
-        print(f"[trade-history] could not save: {e}", file=sys.stderr)
+    def __init__(self, ledger):
+        self.by_perm = {}
+        self.by_key  = defaultdict(list)
+        for rec in ledger.values():
+            if rec.get("permId"):
+                self.by_perm[str(rec["permId"])] = rec
+            key = (rec.get("symbol"), (rec.get("action") or "").upper(),
+                   _norm_type(rec.get("orderType")))
+            try:
+                seen = dt.date.fromisoformat(rec.get("last_seen", ""))
+            except (ValueError, TypeError):
+                seen = dt.date.min
+            self.by_key[key].append((seen, rec.get("limit"), rec.get("trigger")))
 
 
 def build_order_lookup(ledger):
-    """(symbol, action, normType) -> list of (last_seen_date, limit, trigger)."""
-    lookup = defaultdict(list)
-    for rec in ledger.values():
-        key = (rec.get("symbol"), (rec.get("action") or "").upper(),
-               _norm_type(rec.get("orderType")))
-        try:
-            seen = dt.date.fromisoformat(rec.get("last_seen", ""))
-        except (ValueError, TypeError):
-            seen = dt.date.min
-        lookup[key].append((seen, rec.get("limit"), rec.get("trigger")))
-    return lookup
+    return OrderLookup(ledger)
 
 
-def lookup_order_prices(order_lookup, symbol, action, order_type, trade_date):
-    """Return (limit, trigger) for the ledger order best matching a trade."""
+def lookup_order_prices(order_lookup, symbol, action, order_type, trade_date, perm_id=None):
+    """Return (limit, trigger) for the ledger order behind a trade."""
     if not order_lookup:
         return None, None
+    if perm_id:
+        rec = order_lookup.by_perm.get(str(perm_id))
+        if rec:
+            return rec.get("limit"), rec.get("trigger")
     key = (symbol, (action or "").upper(), _norm_type(order_type))
-    cands = order_lookup.get(key, [])
+    cands = order_lookup.by_key.get(key, [])
     if not cands:
         return None, None
     td = trade_date or dt.date.min
@@ -508,6 +448,159 @@ def lookup_order_prices(order_lookup, symbol, action, order_type, trade_date):
     pick = (max(prior, key=lambda c: c[0]) if prior
             else min(cands, key=lambda c: abs((c[0] - td).days)))
     return pick[1], pick[2]
+
+
+# ----------------------------------------------------------------------
+# Fill store: data/<ACCOUNT>/fills/YYYY-MM-DD.json
+#
+# One record per fill, keyed by IBKR execution ID. Flex (`ibExecID`) and the
+# live TWS feed (`execId`) report the SAME ID for the same fill, so a fill
+# captured live today and published by Flex tomorrow lands on ONE record,
+# tagged source=BOTH. Different IDs are genuinely different fills and are all
+# kept, even when date/side/qty/price are identical.
+#
+# Corrections: IBKR re-issues a corrected fill with the last part of the ID
+# bumped (e.g. ...01.01 -> ...01.02). The key is the ID without that last part,
+# and the highest version wins.
+# ----------------------------------------------------------------------
+def _exec_id(row):
+    for k in ("ibExecID", "execID", "execId"):
+        v = row.get(k)
+        if v not in (None, ""):
+            return str(v).strip()
+    return None
+
+
+def _exec_base_and_version(eid):
+    parts = eid.split(".")
+    if len(parts) >= 3:
+        try:
+            return ".".join(parts[:-1]), int(parts[-1], 16)
+        except ValueError:
+            pass
+    return eid, 0
+
+
+def _fill_dedup_key(symbol, action, qty, price, d):
+    """Fallback identity for the few legacy fills that carry no execution ID.
+    Quantity is unsigned: Flex reports sells as negative, TWS as positive."""
+    a = str(action).upper().strip()
+    a = "BUY" if a in ("BUY", "BOT", "B") else "SELL" if a in ("SELL", "SLD", "S") else a
+    return (d, str(symbol), a, round(abs(_flt(qty)), 4), round(_flt(price), 6))
+
+
+def _fill_key(row):
+    eid = _exec_id(row)
+    if eid:
+        return "id:" + _exec_base_and_version(eid)[0]
+    k = _fill_dedup_key(row.get("symbol") or row.get("description"), row.get("buySell"),
+                        row.get("quantity"), row.get("tradePrice"), parse_trade_date(row))
+    return "fp:" + "|".join(str(p) for p in k)
+
+
+def _fill_day(row):
+    d = parse_trade_date(row)
+    return d.isoformat() if d else "undated"
+
+
+def load_fill_store():
+    """All stored fills for the account: {key: record}."""
+    store = {}
+    for path in sorted(glob.glob(os.path.join(_fills_dir(), "*.json"))):
+        store.update(_read_json(path, {}))
+    return store
+
+
+def save_fill_store(store):
+    """Write one file per trade date. Only files whose content changed are
+    rewritten; a day file left empty (its fill moved date) is removed."""
+    by_day = defaultdict(dict)
+    for key, rec in store.items():
+        by_day[_fill_day(rec)][key] = rec
+    existing = {os.path.basename(p)[:-5]: p
+                for p in glob.glob(os.path.join(_fills_dir(), "*.json"))}
+    written = 0
+    for day, recs in by_day.items():
+        path = os.path.join(_fills_dir(), f"{day}.json")
+        if _read_json(path, None) != recs:
+            _write_json_atomic(path, recs)
+            written += 1
+    for day, path in existing.items():
+        if day not in by_day:
+            os.remove(path)
+    return written
+
+
+def upsert_fill(store, row, source):
+    """Insert or merge one fill. Returns 'new', 'merged' or 'skipped'."""
+    clean = {k: v for k, v in row.items() if not k.startswith("_")}
+    key   = _fill_key(clean)
+    eid   = _exec_id(clean)
+
+    # A legacy no-ID record for this same fill is replaced by the ID record.
+    if eid:
+        k = _fill_dedup_key(clean.get("symbol") or clean.get("description"),
+                            clean.get("buySell"), clean.get("quantity"),
+                            clean.get("tradePrice"), parse_trade_date(clean))
+        legacy = store.pop("fp:" + "|".join(str(p) for p in k), None)
+        if legacy and key not in store:
+            store[key] = legacy
+
+    old = store.get(key)
+    if old is None:
+        clean["source"]     = source
+        clean["first_seen"] = dt.date.today().isoformat()
+        store[key] = clean
+        return "new"
+
+    merged = dict(old)
+    old_eid = _exec_id(old)
+    new_ver = _exec_base_and_version(eid)[1] if eid else 0
+    old_ver = _exec_base_and_version(old_eid)[1] if old_eid else 0
+    if eid and old_eid and new_ver < old_ver:
+        return "skipped"                    # older version of a corrected fill
+    # Flex is the official record: once a fill has Flex data, a later live copy
+    # only fills blanks (e.g. it must not replace the full name with the ticker).
+    flex_owned = (source == "LIVE" and old.get("source") in ("FLEX", "BOTH")
+                  and not new_ver > old_ver)
+    for k, v in clean.items():
+        if v in (None, ""):                 # never blank out a known value
+            continue
+        if flex_owned and merged.get(k) not in (None, ""):
+            continue
+        merged[k] = v
+    srcs = {old.get("source") or source, source}
+    merged["source"] = "BOTH" if ("BOTH" in srcs or {"LIVE", "FLEX"} <= srcs) else source
+    if eid and old_eid and new_ver > old_ver:
+        merged["corrected"] = True
+    store[key] = merged
+    return "merged"
+
+
+def import_legacy_stores(store, ledger):
+    """One-time import of the old single-file stores (trade_history.json,
+    trades_cache.json, orders_ledger.json), keeping ONLY the reported account's
+    fills. The old files are left in place as a backup."""
+    n = 0
+    for rec in _read_json(LEGACY_HISTORY_FILE, {}).values():
+        if rec.get("accountId") != ACCOUNT:
+            continue
+        src = "FLEX" if rec.get("conid") not in (None, "") else "LIVE"
+        upsert_fill(store, rec, src)
+        n += 1
+    for exec_id, ex in _read_json(LEGACY_CACHE_FILE, {}).items():
+        if ex.get("account") != ACCOUNT:
+            continue
+        row = _exec_to_flex_row(ex)
+        row["ibExecID"] = row.get("ibExecID") or exec_id
+        upsert_fill(store, row, "LIVE")
+        n += 1
+    m = 0
+    for oid, rec in _read_json(LEGACY_LEDGER_FILE, {}).items():
+        ledger.setdefault(oid, rec)
+        m += 1
+    print(f"  [Import] {n} fill record(s) and {m} order(s) imported from the old "
+          f"single-file stores for {ACCOUNT}.")
 
 
 # ----------------------------------------------------------------------
@@ -669,7 +762,8 @@ def build_individual_trade_rows(trade_rows, date_filter=None, order_lookup=None,
         # Trigger / limit are order-level fields, absent from Flex trades.
         # Prefer the captured order ledger; fall back to any Flex fields.
         led_lim, led_trg = lookup_order_prices(order_lookup, symbol, action,
-                                               r.get("orderType"), parse_trade_date(r))
+                                               r.get("orderType"), parse_trade_date(r),
+                                               perm_id=r.get("permId") or r.get("ibOrderID"))
         trigger = (led_trg if led_trg is not None
                    else r.get("triggerPrice") or r.get("auxPrice") or r.get("stopPrice"))
         limit   = (led_lim if led_lim is not None
@@ -732,12 +826,12 @@ def _list_previous_reports():
             if os.path.abspath(path) == os.path.abspath(OUTPUT_FILE):
                 continue
             d = dt.date.min
-            for prefix in ("MIS_paper_", "MIS_", "Reports_"):
+            m = re.match(r"(?:MIS_paper_|MIS_|Reports_)(\d{2}[A-Za-z]{3}\d{4})", fn)
+            if m:
                 try:
-                    d = dt.datetime.strptime(fn, prefix + "%d%b%Y.xlsx").date()
-                    break
+                    d = dt.datetime.strptime(m.group(1), "%d%b%Y").date()
                 except ValueError:
-                    continue
+                    pass
             candidates.append((d, os.path.getmtime(path), path))
     except OSError:
         return []
@@ -844,35 +938,6 @@ def load_previous_report():
     return manual_prices
 
 
-def build_trade_rows(executions):
-    """Supplementary: live fills received from reqExecutions this session.
-    Aligned to TODAY_HEADERS; Order Type / Realized PnL aren't carried by the
-    execution feed, so those cells are left blank for live rows."""
-    rows = []
-    for sr, ex in enumerate(
-        sorted(executions.values(), key=lambda e: str(e["time"])), start=1
-    ):
-        exec_time = _parse_exec_time(ex["time"])
-        rows.append([
-            exec_time,                                       # Date & Time (UTC)
-            _to_gst(exec_time),                              # Date & Time (GST) — Dubai, UTC+4
-            sr,
-            ex["contract"],
-            "",                                              # Name (not in exec feed)
-            ex["action"],
-            ex["quantity"],
-            f"{ex['price']:.4f}"      if ex["price"]      is not None else "",
-            "",                                              # Trigger Price (n/a)
-            "",                                              # Limit Price (n/a)
-            ex["exchange"],
-            "",                                              # Order Type (n/a)
-            round(abs(ex["commission"]), 2) if ex["commission"] is not None else "",
-            "",                                              # Realized PnL (n/a)
-            ex["account"],
-        ])
-    return rows
-
-
 def _exec_to_flex_row(ex):
     """Map a live TWS execution into a Flex-style trade dict so it flows through
     the same aggregation / realized-PnL pipeline as Flex trades. Commission is
@@ -894,57 +959,9 @@ def _exec_to_flex_row(ex):
         "dateTime":        " ".join(str(ex.get("time", "")).split()),
         "orderType":       "",
         "fifoPnlRealized": "",
+        "permId":          ex.get("permId") or "",
+        "conid":           str(ex.get("conId") or ""),
     }
-
-
-def _fill_dedup_key(symbol, action, qty, price, d):
-    """Stable identity for one fill across the Flex and TWS feeds."""
-    a = str(action).upper().strip()
-    a = "BUY" if a in ("BUY", "BOT", "B") else "SELL" if a in ("SELL", "SLD", "S") else a
-    return (d, str(symbol), a, round(_flt(qty), 4), round(_flt(price), 6))
-
-
-def merge_live_executions(flex_rows, executions):
-    """Combine the Flex statement's trades with cached TWS executions.
-
-    IBKR's Flex batch lags — the most recent day(s) of fills usually aren't in
-    it yet — so without this the report drops them. `executions` is the persisted
-    trades cache (today's fills plus those captured on recent runs). Each cached
-    execution the Flex statement hasn't already published (matched on date,
-    contract, side, quantity and price) is appended as a Flex-style row so it
-    appears on every sheet. Returns the merged list.
-
-    A cached fill is matched to the Flex batch by IBKR execution ID (exact, and
-    shared by both feeds) when available, so several genuinely distinct fills that
-    share the same date/side/qty/price are all kept instead of being folded into
-    one. Only id-less legacy rows fall back to the coarse fingerprint match."""
-    flex_ids  = {i for i in (_fill_identity(r) for r in flex_rows) if i is not None}
-    flex_keys = {
-        _fill_dedup_key(r.get("symbol") or r.get("description"), r.get("buySell"),
-                        r.get("quantity"), r.get("tradePrice"), parse_trade_date(r))
-        for r in flex_rows
-    }
-    merged = list(flex_rows)
-    added  = 0
-    for exec_id, ex in executions.items():
-        fr = _exec_to_flex_row(ex)
-        # The trades cache is keyed by execId; recover it onto rows cached before
-        # execId was persisted, so they too dedup/key by execution ID.
-        if not fr.get("ibExecID"):
-            fr["ibExecID"] = exec_id
-        eid = _fill_identity(fr)
-        if eid is not None:
-            if eid in flex_ids:
-                continue                   # same execution already in the Flex batch
-        elif _fill_dedup_key(fr["symbol"], fr["buySell"], fr["quantity"],
-                             fr["tradePrice"], parse_trade_date(fr)) in flex_keys:
-            continue                       # legacy id-less row: fingerprint fallback
-        merged.append(fr)
-        added += 1
-    if added:
-        print(f"  [Live fills] merged {added} TWS execution(s) not yet in the "
-              f"Flex statement.")
-    return merged
 
 
 # ----------------------------------------------------------------------
@@ -958,7 +975,7 @@ def send_request():
     if status != "Success":
         code = root.findtext("ErrorCode")
         msg  = root.findtext("ErrorMessage")
-        sys.exit(f"SendRequest failed [{code}]: {msg}")
+        raise RuntimeError(f"SendRequest failed [{code}]: {msg}")
     ref = root.findtext("ReferenceCode")
     print(f"Reference code: {ref}")
     return ref
@@ -980,12 +997,12 @@ def get_statement(ref):
             code = root.findtext("ErrorCode")
             msg  = root.findtext("ErrorMessage")
             if code and code not in ("1019",):
-                sys.exit(f"GetStatement failed [{code}]: {msg}")
+                raise RuntimeError(f"GetStatement failed [{code}]: {msg}")
             print(f"  not ready yet (attempt {attempt}/{MAX_POLL_ATTEMPTS}), waiting...")
         except ET.ParseError:
             pass
         time.sleep(POLL_WAIT_SECONDS)
-    sys.exit("Statement not ready after maximum retries.")
+    raise RuntimeError("Statement not ready after maximum retries.")
 
 
 # ----------------------------------------------------------------------
@@ -1308,14 +1325,15 @@ def _tab(name):
 
 
 # Sheet display titles
-_FROM_STR = DATA_FROM.strftime("%d-%b-%Y")
-_SHEET_TITLES = {
-    "Dashboard":       "ACCOUNT DASHBOARD",
-    "Pending Order":   "PENDING ORDERS",
-    "All Trades":      f"ALL TRADES  (From {_FROM_STR})",
-    "Open Position":   f"OPEN POSITIONS  (From {_FROM_STR})",
-    "Trade Summary":    f"TRADE SUMMARY  (From {_FROM_STR})",
-}
+def _sheet_titles():
+    frm = DATA_FROM.strftime("%d-%b-%Y")
+    return {
+        "Dashboard":     "ACCOUNT DASHBOARD",
+        "Pending Order": "PENDING ORDERS",
+        "All Trades":    f"ALL TRADES  (From {frm})",
+        "Open Position": f"OPEN POSITIONS  (From {frm})",
+        "Trade Summary": f"TRADE SUMMARY  (From {frm})",
+    }
 
 
 def _write_title_row(ws, text, n_cols):
@@ -1364,7 +1382,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     yesterday = today - dt.timedelta(days=1)
     cutoff_7  = today - dt.timedelta(days=7)
 
-    # ── Global cutoff: keep only trades on/after DATA_FROM (25-May-2026) ──
+    # ── Global cutoff: keep only trades on/after DATA_FROM ──
     rows = [r for r in rows if (parse_trade_date(r) or dt.date.min) >= DATA_FROM]
     print(f"  [Filter] {len(rows)} trade(s) on/after {DATA_FROM:%d-%b-%Y}.")
 
@@ -1412,6 +1430,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     _fill_running_positions_sheet(wb.create_sheet(),  rows)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_sheet(wb.create_sheet(), "Trade Summary",   agg_all)
+    os.makedirs(_REPORTS_DIR, exist_ok=True)
     wb.save(OUTPUT_FILE)
     print(f"Wrote {OUTPUT_FILE}: {len(pending_rows)} pending, "
           f"{len(all_trade_rows)} all trades, "
@@ -1551,7 +1570,7 @@ def _fill_dashboard_sheet(ws, account_id, account_data, pending_rows,
     now_ist   = dt.datetime.now(_IST)
     n_cols    = 2   # Parameter | Value
 
-    _write_title_row(ws, _SHEET_TITLES["Dashboard"], n_cols)
+    _write_title_row(ws, _sheet_titles()["Dashboard"], n_cols)
     _write_header_row(ws, ["Parameter", "Value"], row=2)
 
     # ── Report info ───────────────────────────────────────────────────
@@ -1630,7 +1649,7 @@ def _fill_trade_list_sheet(ws, sheet_key, rows):
     ws.title  = _tab(sheet_key)
     n_cols    = len(TODAY_HEADERS)
 
-    _write_title_row(ws, _SHEET_TITLES[sheet_key], n_cols)
+    _write_title_row(ws, _sheet_titles()[sheet_key], n_cols)
     _write_header_row(ws, TODAY_HEADERS, row=2)
 
     for row in rows:
@@ -1661,7 +1680,7 @@ def _fill_pending_sheet(ws, rows):
     ws.title  = _tab("Pending Order")
     n_cols    = len(PENDING_HEADERS)
 
-    _write_title_row(ws, _SHEET_TITLES["Pending Order"], n_cols)
+    _write_title_row(ws, _sheet_titles()["Pending Order"], n_cols)
     _write_header_row(ws, PENDING_HEADERS, row=2)
 
     for row in rows:
@@ -1690,7 +1709,7 @@ def _fill_sheet(ws, title, agg_rows):
     ws.title = _tab(title)
     n_cols   = len(HEADERS)
 
-    _write_title_row(ws, _SHEET_TITLES.get(title, title.upper()), n_cols)
+    _write_title_row(ws, _sheet_titles().get(title, title.upper()), n_cols)
     _write_header_row(ws, HEADERS, row=2)
 
     for row in agg_rows:
@@ -1719,60 +1738,143 @@ def _fill_sheet(ws, title, agg_rows):
     ws.freeze_panes = "A3"
 
 
-def main():
-    print("Connecting to TWS - fetching open/completed orders, executions, and account summary...")
-    orders_by_symbol, account_data, executions, completed_orders = fetch_tws_data()
-    pending_rows = build_pending_rows(orders_by_symbol)
-    trade_rows   = build_trade_rows(executions)
-    print(f"  {len(pending_rows)} pending order rows | "
-          f"{len(trade_rows)} today's executions | "
-          f"{len(completed_orders)} completed orders | "
-          f"{len(account_data)} account tags collected.")
+def fetch_flex():
+    """Download the Flex statement. Returns (trade_rows, flex_account, error).
+    A failure is reported, not fatal: the report is still built from the store."""
+    try:
+        ref      = send_request()
+        xml_text = get_statement(ref)
+        return parse_trades(xml_text), parse_account_id(xml_text), None
+    except (requests.RequestException, RuntimeError, ET.ParseError) as e:
+        print(f"[Flex] download failed: {e} - building the report from stored "
+              f"fills only.", file=sys.stderr)
+        return [], None, str(e)
 
-    # Persist trigger/limit from both open AND completed orders, then build the
-    # lookup used to back-fill those prices onto matching trades.
+
+def resolve_account(managed_accounts, flex_account):
+    """IBKR_ACCOUNT from .env, else the Gateway login's single account, else the
+    Flex statement's account."""
+    if ACCOUNT:
+        return ACCOUNT
+    if len(managed_accounts) == 1:
+        return managed_accounts[0]
+    if len(managed_accounts) > 1:
+        sys.exit(f"Error: the Gateway login has several accounts {managed_accounts}. "
+                 f"Set IBKR_ACCOUNT in .env to the one to report on.")
+    if flex_account and flex_account != "N/A":
+        return flex_account
+    sys.exit("Error: could not determine the account (Gateway not reachable and no "
+             "Flex data). Set IBKR_ACCOUNT in .env.")
+
+
+def _for_account(acct):
+    return lambda a: (a or "") == acct
+
+
+def main():
+    warnings = []
+
+    print("Connecting to TWS - fetching open/completed orders, executions, and account summary...")
+    (orders_by_symbol, account_data, executions,
+     completed_orders, managed_accounts) = fetch_tws_data()
+    if not managed_accounts and not executions and not orders_by_symbol:
+        warnings.append("gateway-unreachable-or-empty")
+
+    print("Downloading Flex statement...")
+    flex_rows, flex_account, flex_error = fetch_flex()
+    if flex_error:
+        warnings.append("flex-failed")
+
+    set_account(resolve_account(managed_accounts, flex_account))
+    print(f"Reporting account: {ACCOUNT}")
+
+    # ── Keep only the reported account's data from both feeds ─────────────
+    mine = _for_account(ACCOUNT)
+    if managed_accounts and ACCOUNT not in managed_accounts:
+        print(f"[WARN] Gateway is logged in to {managed_accounts}, not {ACCOUNT} - "
+              f"no live data for this account.", file=sys.stderr)
+        warnings.append("gateway-other-account")
+    if flex_account and flex_account not in ("N/A", ACCOUNT):
+        print(f"[WARN] The Flex Query belongs to {flex_account}, not {ACCOUNT} - its "
+              f"trades are ignored. Create the Flex Query under {ACCOUNT}.", file=sys.stderr)
+        warnings.append("flex-other-account")
+
+    executions = {k: v for k, v in executions.items() if mine(v.get("account"))}
+    orders_by_symbol = {sym: legs for sym, legs in
+                        ((s, [o for o in l if not o.get("account") or mine(o["account"])])
+                         for s, l in orders_by_symbol.items()) if legs}
+    completed_orders = [o for o in completed_orders
+                        if not o.get("account") or mine(o["account"])]
+    account_data = account_data.get(ACCOUNT, {})
+    flex_mine = [r for r in flex_rows if mine(r.get("accountId") or flex_account)]
+
+    pending_rows = build_pending_rows(orders_by_symbol)
+    print(f"  Live: {len(pending_rows)} pending order rows | {len(executions)} fill(s) today | "
+          f"{len(completed_orders)} completed order(s) | {len(account_data)} account tag(s).")
+    print(f"  Flex: {len(flex_mine)} of {len(flex_rows)} trade record(s) belong to {ACCOUNT}.")
+
+    # ── Report start date ─────────────────────────────────────────────────
+    state = load_state()
+    if _DATA_FROM_ENV:
+        try:
+            start = dt.date.fromisoformat(_DATA_FROM_ENV)
+        except ValueError:
+            sys.exit(f"Error: IBKR_DATA_FROM must be YYYY-MM-DD, got {_DATA_FROM_ENV!r}.")
+    else:
+        start = dt.date.fromisoformat(state.setdefault("start_date", dt.date.today().isoformat()))
+    set_data_from(start)
+    print(f"  Report covers trades from {DATA_FROM:%d-%b-%Y}.")
+
+    # ── Order ledger (trigger / limit per order) ──────────────────────────
     ledger = load_order_ledger()
+    store  = load_fill_store()
+    if not state.get("legacy_imported"):
+        import_legacy_stores(store, ledger)
+        state["legacy_imported"] = dt.date.today().isoformat()
     update_order_ledger(ledger, orders_by_symbol, completed_orders)
     save_order_ledger(ledger)
     order_lookup = build_order_lookup(ledger)
-    print(f"  [Order Ledger] {len(ledger)} order(s) tracked for trigger/limit history "
-          f"({LEDGER_FILE}).")
+    print(f"  [Order Ledger] {len(ledger)} order(s) tracked ({_ledger_file()}).")
 
-    # Persist today's live executions so the most recent trading day(s) aren't
-    # lost while the Flex statement lags behind. The cache (today's fills plus
-    # those captured on recent runs) is what we merge into the Flex trades.
-    trades_cache = load_trades_cache()
-    update_trades_cache(trades_cache, executions)
-    save_trades_cache(trades_cache)
-    print(f"  [Trades Cache] {len(trades_cache)} execution(s) retained to bridge the "
-          f"Flex lag ({TRADES_CACHE_FILE}).")
+    # ── Fill store: live first, then Flex (Flex enriches/confirms) ────────
+    counts = defaultdict(int)
+    for ex in executions.values():
+        counts["live_" + upsert_fill(store, _exec_to_flex_row(ex), "LIVE")] += 1
+    for r in flex_mine:
+        counts["flex_" + upsert_fill(store, r, "FLEX")] += 1
+    days_written = save_fill_store(store)
+    state["last_run"] = dt.datetime.now().isoformat(timespec="seconds")
+    save_state(state)
+    print(f"  [Fill Store] {len(store)} fill(s) stored | live new={counts['live_new']} "
+          f"merged={counts['live_merged']} | flex new={counts['flex_new']} "
+          f"merged={counts['flex_merged']} | {days_written} day file(s) updated "
+          f"({_fills_dir()}).")
 
-    ref        = send_request()
-    xml_text   = get_statement(ref)
-    rows       = parse_trades(xml_text)
-    account_id = parse_account_id(xml_text)
-    print(f"Account: {account_id} | Parsed {len(rows)} trade records from Flex.")
+    unconfirmed = [r for r in store.values() if r.get("source") == "LIVE"
+                   and (parse_trade_date(r) or dt.date.max) < dt.date.today() - dt.timedelta(days=3)]
+    if unconfirmed and not flex_error:
+        print(f"[WARN] {len(unconfirmed)} live fill(s) older than 3 days are still not in "
+              f"the Flex statement - check the Flex Query's account and period.",
+              file=sys.stderr)
 
-    # The Flex statement lags — the most recent day(s) of fills usually aren't in
-    # it yet. Merge in the cached TWS executions (today's plus any captured on
-    # recent runs) so no trading day is lost while Flex catches up.
-    rows = merge_live_executions(rows, trades_cache)
-
-    # Accumulate every trade into the persistent full-history store, then build
-    # the report from the COMPLETE history. This way the sheets always show the
-    # full record from DATA_FROM even when the Flex Query returns only a short
-    # rolling window, and a single empty/failed run can never shrink them.
-    history = load_trade_history()
-    update_trade_history(history, rows)
-    save_trade_history(history)
-    rows = list(history.values())
-    print(f"  [Trade History] {len(rows)} trade(s) in the full-history store "
-          f"({TRADE_HISTORY_FILE}).")
-
+    rows = list(store.values())
     if not rows:
-        print("No trades found. Check the query's date range and section config.")
-    write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_lookup)
+        print("No trades stored yet for this account.")
+    write_excel(rows, pending_rows, [], ACCOUNT, account_data, order_lookup)
+
+    log_run("WARN" if warnings else "OK",
+            fills_stored=len(store), live_today=len(executions), flex_rows=len(flex_mine),
+            pending=len(pending_rows), report=os.path.basename(OUTPUT_FILE),
+            warnings=",".join(warnings) or "-")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            log_run("FAILED", error=str(e.code).splitlines()[0])
+        raise
+    except Exception as e:                                  # noqa: BLE001
+        log_run("FAILED", error=f"{type(e).__name__}: {e}")
+        raise
