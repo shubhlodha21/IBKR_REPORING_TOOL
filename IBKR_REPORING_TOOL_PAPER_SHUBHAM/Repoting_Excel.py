@@ -1608,7 +1608,7 @@ def _sheet_titles():
         "Order_Status":  "ORDER STATUS  (Orders seen on this run)",
         "All Trades":    f"ALL TRADES  (From {frm})",
         "All Trades Detail": f"ALL TRADES DETAIL  (From {frm})",
-        "Open Position": "OPEN POSITIONS  (Full history, live P&L)",
+        "Open Position": f"OPEN POSITIONS  (From {frm}, live P&L)",
         "Trade Summary": f"TRADE SUMMARY  (From {frm})",
     }
 
@@ -1715,7 +1715,7 @@ def write_excel(rows, pending_rows, trade_rows, account_id, account_data, order_
     _fill_pending_sheet(wb.create_sheet(),            pending_rows)
     _fill_table_sheet(wb.create_sheet(), "Order_Status", ORDER_STATUS_HEADERS,
                       ORDER_STATUS_WIDTHS, order_status_rows or [])
-    _fill_running_positions_sheet(wb.create_sheet(),  all_rows, portfolio)
+    _fill_running_positions_sheet(wb.create_sheet(),  rows, portfolio)
     _fill_trade_list_sheet(wb.create_sheet(), "All Trades", all_trade_rows)
     _fill_table_sheet(wb.create_sheet(), "All Trades Detail", DETAIL_HEADERS,
                       DETAIL_WIDTHS, detail_rows,
@@ -2023,8 +2023,8 @@ def _fill_pending_sheet(ws, rows):
 
 # ── Open Position sheet ───────────────────────────────────────────────
 def _fill_running_positions_sheet(ws, trade_rows, portfolio=None):
-    # A position's size and realized P&L come from its whole history, not
-    # just the report window.
+    # Figures (dates, buys/sells, realized P&L) cover the report window only;
+    # which positions are open, their size and unrealized P&L come live from IB.
     agg     = aggregate(trade_rows, portfolio)
     if portfolio is None:
         # Gateway not connected: fall back to the net quantity from history.
@@ -2035,7 +2035,7 @@ def _fill_running_positions_sheet(ws, trade_rows, portfolio=None):
         running = [dict(r, Net=portfolio[r["Contract"]]["position"])
                    for r in agg if r["Contract"] in portfolio]
         known = {r["Contract"] for r in running}
-        for sym, p in portfolio.items():            # opened before stored history
+        for sym, p in portfolio.items():            # open, but not traded in the window
             if sym not in known:
                 running.append({h: "" for h in HEADERS} | {
                     "Contract": sym, "Net": p["position"], "Realized P&L": 0.0,
