@@ -9,7 +9,7 @@ Daily IBKR MIS report for ONE account. Each run:
         data/<ACCOUNT>/orders_ledger.json
         data/<ACCOUNT>/state.json
         data/runs.log
-  4. Writes reports/MIS_paper_<date>_Shubham.xlsx with the sheets
+  4. Writes reports/Paper_Reports_Top25stocks_<DDMMYYYY>.xlsx with the sheets
      Index, Dashboard, Pending Order, Open Position, All Trades, Trade Summary,
      covering every trade from DATA_FROM up to the moment of the run.
 
@@ -60,7 +60,10 @@ _DATA_FROM_ENV = os.environ.get("IBKR_DATA_FROM", "").strip()
 
 _BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 _REPORTS_DIR = os.path.join(_BASE_DIR, "reports")
-OUTPUT_FILE  = os.path.join(_REPORTS_DIR, dt.date.today().strftime("MIS_paper_%d%b%Y") + "_Shubham.xlsx")
+# Daily report, e.g. Paper_Reports_Top25stocks_25112026.xlsx (DDMMYYYY). A second run
+# on the same day overwrites that day's file.
+OUTPUT_FILE  = os.path.join(_REPORTS_DIR,
+                            dt.date.today().strftime("Paper_Reports_Top25stocks_%d%m%Y") + ".xlsx")
 
 # Per-account store. Every fill is kept in the file for its trade date, keyed by
 # IBKR execution ID, so Flex and live TWS copies of one fill share one record.
@@ -1027,8 +1030,8 @@ def build_today_rows_from_flex(trade_rows):
 def _list_previous_reports():
     """All prior report files in the reports folder, newest first (by the date
     encoded in the filename, then modified time), excluding today's OUTPUT_FILE.
-    Accepts the current "MIS_paper_" prefix and the legacy "MIS_"/"Reports_"
-    prefixes."""
+    Accepts the current "Paper_Reports_Top25stocks_<DDMMYYYY>" name and the
+    earlier "MIS_paper_<DDMonYYYY>" / "MIS_" / "Reports_" names."""
     try:
         candidates = []
         for fn in os.listdir(_REPORTS_DIR):
@@ -1038,12 +1041,15 @@ def _list_previous_reports():
             if os.path.abspath(path) == os.path.abspath(OUTPUT_FILE):
                 continue
             d = dt.date.min
+            m_new = re.match(r"Paper_Reports_Top25stocks_(\d{8})\.xlsx$", fn)
             m = re.match(r"(?:MIS_paper_|MIS_|Reports_)(\d{2}[A-Za-z]{3}\d{4})", fn)
-            if m:
-                try:
+            try:
+                if m_new:
+                    d = dt.datetime.strptime(m_new.group(1), "%d%m%Y").date()
+                elif m:
                     d = dt.datetime.strptime(m.group(1), "%d%b%Y").date()
-                except ValueError:
-                    pass
+            except ValueError:
+                pass
             candidates.append((d, os.path.getmtime(path), path))
     except OSError:
         return []
